@@ -35,6 +35,42 @@ fn clipboard_copy(text: &str) {
     }
 }
 
+/// Try to get an image from the clipboard and encode it as OSC 1337 bytes.
+/// Returns None if clipboard has no image.
+fn clipboard_image_as_osc1337() -> Option<Vec<u8>> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    let img = cb.get_image().ok()?;
+
+    // Encode RGBA pixels to PNG
+    let mut png_buf = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_buf, img.width as u32, img.height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(&img.bytes).ok()?;
+    }
+
+    // Base64-encode the PNG
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
+
+    // Build OSC 1337 File sequence
+    // Format: ESC ] 1337 ; File=name=<b64name>;size=<size>;inline=0 : <b64data> BEL
+    let name_b64 = base64::engine::general_purpose::STANDARD.encode("clipboard.png");
+    let header = format!(
+        "\x1b]1337;File=name={};size={};inline=0:",
+        name_b64,
+        png_buf.len()
+    );
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.extend_from_slice(b64.as_bytes());
+    bytes.push(0x07); // BEL terminator
+    Some(bytes)
+}
+
 struct Koi {
     window: Option<Window>,
     gl_context: Option<glutin::context::PossiblyCurrentContext>,
@@ -701,12 +737,15 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             }
                             return;
                         }
-                        // Cmd+V: Paste from clipboard
+                        // Cmd+V: Paste from clipboard (image first, then text)
                         Key::Character(ref s) if s == "v" => {
-                            if let Some(text) = clipboard_paste() {
-                                if let Some(tab_manager) = &self.tab_manager {
-                                    if let Some(pane) = tab_manager.active_pane() {
-                                        // Bracket paste: sanitize end-sequence to prevent injection
+                            if let Some(tab_manager) = &self.tab_manager {
+                                if let Some(pane) = tab_manager.active_pane() {
+                                    // Try image paste first (OSC 1337)
+                                    if let Some(osc_bytes) = clipboard_image_as_osc1337() {
+                                        pane.notifier.send_input(&osc_bytes);
+                                    } else if let Some(text) = clipboard_paste() {
+                                        // Text paste with bracket mode
                                         let sanitized = text.replace("\x1b[201~", "");
                                         let mut bytes = Vec::new();
                                         bytes.extend_from_slice(b"\x1b[200~");
