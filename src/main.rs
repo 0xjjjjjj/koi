@@ -16,7 +16,7 @@ use glutin::surface::{SurfaceAttributesBuilder, WindowSurface};
 use glutin_winit::DisplayBuilder;
 use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes};
@@ -29,6 +29,12 @@ fn clipboard_paste() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+fn clipboard_copy(text: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text.to_owned());
+    }
+}
+
 struct Koi {
     window: Option<Window>,
     gl_context: Option<glutin::context::PossiblyCurrentContext>,
@@ -39,6 +45,7 @@ struct Koi {
     modifiers: ModifiersState,
     cursor_pos: (f64, f64),
     cursor_blink: std::time::Instant,
+    mouse_left_pressed: bool,
 }
 
 impl Koi {
@@ -53,6 +60,7 @@ impl Koi {
             modifiers: ModifiersState::empty(),
             cursor_pos: (0.0, 0.0),
             cursor_blink: std::time::Instant::now(),
+            mouse_left_pressed: false,
         }
     }
 
@@ -152,11 +160,18 @@ impl ApplicationHandler<KoiEvent> for Koi {
 
         // Log GL info
         unsafe {
-            let version = std::ffi::CStr::from_ptr(gl::GetString(gl::VERSION) as *const _);
-            let renderer_str =
-                std::ffi::CStr::from_ptr(gl::GetString(gl::RENDERER) as *const _);
-            log::info!("OpenGL version: {:?}", version);
-            log::info!("GPU renderer: {:?}", renderer_str);
+            let version = {
+                let ptr = gl::GetString(gl::VERSION);
+                if ptr.is_null() { "unknown" }
+                else { std::ffi::CStr::from_ptr(ptr as *const _).to_str().unwrap_or("unknown") }
+            };
+            let renderer_str = {
+                let ptr = gl::GetString(gl::RENDERER);
+                if ptr.is_null() { "unknown" }
+                else { std::ffi::CStr::from_ptr(ptr as *const _).to_str().unwrap_or("unknown") }
+            };
+            log::info!("OpenGL version: {}", version);
+            log::info!("GPU renderer: {}", renderer_str);
         }
 
         // Create renderer after GL is initialized
@@ -203,24 +218,62 @@ impl ApplicationHandler<KoiEvent> for Koi {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
+                // Update selection while dragging
+                if self.mouse_left_pressed {
+                    if let (Some(tab_manager), Some(renderer), Some(window)) =
+                        (&self.tab_manager, &self.renderer, &self.window)
+                    {
+                        let scale = window.scale_factor() as f32;
+                        let cw = renderer.cell_width();
+                        let ch = renderer.cell_height();
+                        let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
+                        let cx = position.x as f32 * scale;
+                        let cy = position.y as f32 * scale - tab_bar_h;
+                        let size = window.inner_size();
+                        let viewport_h = size.height as f32 - tab_bar_h;
+                        let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
+                        let active_id = tab_manager.active_tab().pane_tree.active_pane_id();
+                        if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
+                            let col = ((cx - layout.x) / cw).max(0.0) as usize;
+                            let line = ((cy - layout.y) / ch).max(0.0) as i32;
+                            let point = alacritty_terminal::index::Point::new(
+                                alacritty_terminal::index::Line(line),
+                                alacritty_terminal::index::Column(col),
+                            );
+                            let side = if ((cx - layout.x) % cw) > cw / 2.0 {
+                                alacritty_terminal::index::Side::Right
+                            } else {
+                                alacritty_terminal::index::Side::Left
+                            };
+                            if let Some(pane) = tab_manager.active_pane() {
+                                let mut term = pane.term.lock();
+                                if let Some(ref mut sel) = term.selection {
+                                    sel.update(point, side);
+                                }
+                                drop(term);
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
+                    }
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
-                button: winit::event::MouseButton::Left,
+                button: MouseButton::Left,
                 ..
             } => {
-                // Click to focus pane
-                if let (Some(tab_manager), Some(window)) =
-                    (&mut self.tab_manager, &self.window)
+                self.mouse_left_pressed = true;
+                // Click to focus pane + start selection
+                if let (Some(tab_manager), Some(renderer), Some(window)) =
+                    (&mut self.tab_manager, &self.renderer, &self.window)
                 {
                     let size = window.inner_size();
-                    let tab_bar_h = if tab_manager.count() > 1 {
-                        self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(18.0)
-                    } else {
-                        0.0
-                    };
+                    let cw = renderer.cell_width();
+                    let ch = renderer.cell_height();
+                    let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
                     let scale = window.scale_factor() as f32;
-                    // cursor_pos is in logical pixels, layouts are in physical
                     let cx = self.cursor_pos.0 as f32 * scale;
                     let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
                     let viewport_h = size.height as f32 - tab_bar_h;
@@ -232,6 +285,26 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             && cy < layout.y + layout.height
                         {
                             tab_manager.focus_pane(layout.pane_id);
+                            // Start selection
+                            let col = ((cx - layout.x) / cw).max(0.0) as usize;
+                            let line = ((cy - layout.y) / ch).max(0.0) as i32;
+                            let point = alacritty_terminal::index::Point::new(
+                                alacritty_terminal::index::Line(line),
+                                alacritty_terminal::index::Column(col),
+                            );
+                            let side = if ((cx - layout.x) % cw) > cw / 2.0 {
+                                alacritty_terminal::index::Side::Right
+                            } else {
+                                alacritty_terminal::index::Side::Left
+                            };
+                            if let Some(pane) = tab_manager.active_pane() {
+                                let mut term = pane.term.lock();
+                                term.selection = Some(alacritty_terminal::selection::Selection::new(
+                                    alacritty_terminal::selection::SelectionType::Simple,
+                                    point,
+                                    side,
+                                ));
+                            }
                             if let Some(w) = &self.window {
                                 w.request_redraw();
                             }
@@ -239,6 +312,13 @@ impl ApplicationHandler<KoiEvent> for Koi {
                         }
                     }
                 }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.mouse_left_pressed = false;
             }
             WindowEvent::Resized(new_size) => {
                 if let (Some(renderer), Some(tab_manager)) =
@@ -605,6 +685,22 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             }
                             return;
                         }
+                        // Cmd+C: Copy selection to clipboard
+                        Key::Character(ref s) if s == "c" => {
+                            if let Some(tab_manager) = &self.tab_manager {
+                                if let Some(pane) = tab_manager.active_pane() {
+                                    let mut term = pane.term.lock();
+                                    if let Some(text) = term.selection_to_string() {
+                                        clipboard_copy(&text);
+                                    }
+                                    term.selection = None;
+                                }
+                            }
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         // Cmd+V: Paste from clipboard
                         Key::Character(ref s) if s == "v" => {
                             if let Some(text) = clipboard_paste() {
@@ -695,6 +791,26 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     notifier.send_input(&bytes);
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll_lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as i32,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        let ch = self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(20.0);
+                        (pos.y / ch as f64) as i32
+                    }
+                };
+                if scroll_lines != 0 {
+                    if let Some(tab_manager) = &self.tab_manager {
+                        if let Some(pane) = tab_manager.active_pane() {
+                            use alacritty_terminal::grid::Scroll;
+                            pane.term.lock().scroll_display(Scroll::Delta(scroll_lines));
+                        }
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -710,6 +826,9 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 if let Some(w) = &self.window {
                     w.set_title(&title);
                 }
+                if let Some(tab_manager) = &mut self.tab_manager {
+                    tab_manager.set_active_tab_title(title);
+                }
             }
             KoiEvent::ChildExit(pane_id, code) => {
                 log::info!("Pane {} exited with code {}", pane_id, code);
@@ -721,6 +840,13 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
+                }
+            }
+            KoiEvent::Bell => {
+                #[cfg(target_os = "macos")]
+                {
+                    extern "C" { fn NSBeep(); }
+                    unsafe { NSBeep(); }
                 }
             }
         }

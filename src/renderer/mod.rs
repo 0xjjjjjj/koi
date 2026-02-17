@@ -199,6 +199,17 @@ impl Renderer {
                 self.draw_rect(cell_x, cell_y, cw, ch, bg_color);
             }
 
+            // Selection highlight
+            if let Some(ref sel) = content.selection {
+                let point = alacritty_terminal::index::Point::new(
+                    indexed.point.line,
+                    indexed.point.column,
+                );
+                if sel.contains(point) {
+                    self.draw_rect(cell_x, cell_y, cw, ch, [0.122, 0.471, 0.706, 0.3]);
+                }
+            }
+
             let c = cell.c;
             if c == ' ' || c == '\t' {
                 continue;

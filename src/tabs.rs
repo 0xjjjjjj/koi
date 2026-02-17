@@ -166,6 +166,10 @@ impl TabManager {
         &mut self.tabs[self.active]
     }
 
+    pub fn set_active_tab_title(&mut self, title: String) {
+        self.tabs[self.active].title = title;
+    }
+
     pub fn active_index(&self) -> usize {
         self.active
     }

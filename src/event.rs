@@ -13,6 +13,8 @@ pub enum KoiEvent {
     Title(String),
     /// Child process exited (pane_id, exit_code).
     ChildExit(usize, i32),
+    /// Terminal bell.
+    Bell,
 }
 
 /// Bridges alacritty_terminal events to winit's event loop.
@@ -42,6 +44,7 @@ impl EventListener for EventProxy {
             TermEvent::Wakeup => KoiEvent::Wakeup,
             TermEvent::Title(title) => KoiEvent::Title(title),
             TermEvent::ChildExit(code) => KoiEvent::ChildExit(self.pane_id, code),
+            TermEvent::Bell => KoiEvent::Bell,
             _ => return,
         };
         let _ = self.proxy.send_event(koi_event);
