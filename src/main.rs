@@ -58,9 +58,15 @@ impl Koi {
         if let (Some(renderer), Some(window)) = (&self.renderer, &self.window) {
             let scale = window.scale_factor() as f32;
             let size = window.inner_size();
-            // inner_size() returns physical pixels; cell dimensions are logical
+            let ch = renderer.cell_height();
+            // Subtract tab bar height when multiple tabs exist
+            let tab_bar_h = if self.tab_manager.as_ref().map_or(false, |t| t.count() > 1) {
+                ch * scale
+            } else {
+                0.0
+            };
             let cols = (size.width as f32 / (renderer.cell_width() * scale)) as usize;
-            let rows = (size.height as f32 / (renderer.cell_height() * scale)) as usize;
+            let rows = ((size.height as f32 - tab_bar_h) / (ch * scale)) as usize;
             (cols.max(2), rows.max(1))
         } else {
             (80, 24)
@@ -239,7 +245,8 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     let cw = renderer.cell_width();
                     let ch = renderer.cell_height();
                     let w = new_size.width as f32;
-                    let h = new_size.height as f32;
+                    let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
+                    let h = new_size.height as f32 - tab_bar_h;
                     tab_manager.resize_all(w, h, cw, ch);
                 }
 
@@ -439,8 +446,16 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             let cw = self.renderer.as_ref().map(|r| r.cell_width()).unwrap_or(8.0);
                             let ch = self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(18.0);
                             if let Some(tab_manager) = &mut self.tab_manager {
+                                let was_single = tab_manager.count() == 1;
                                 tab_manager.add_tab(cols, rows, cw, ch, &self.event_proxy);
-                                log::info!("New tab (total: {})", tab_manager.count());
+                                // Tab bar just appeared — resize all panes for reduced viewport
+                                if was_single {
+                                    if let Some(window) = &self.window {
+                                        let size = window.inner_size();
+                                        let vp_h = size.height as f32 - ch;
+                                        tab_manager.resize_all(size.width as f32, vp_h, cw, ch);
+                                    }
+                                }
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
