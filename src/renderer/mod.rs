@@ -161,6 +161,7 @@ impl Renderer {
         term: &Term<T>,
         offset_x: f32,
         offset_y: f32,
+        show_cursor: bool,
     ) {
         let cw = self.glyph_cache.cell_width;
         let ch = self.glyph_cache.cell_height;
@@ -190,8 +191,13 @@ impl Renderer {
                 std::mem::swap(&mut fg_color, &mut bg_color);
             }
 
-            // Background
-            self.draw_rect(cell_x, cell_y, cw, ch, bg_color);
+            // Background — skip if it matches the default clear color (LATTE_BG)
+            let is_default_bg = (bg_color[0] - LATTE_BG[0]).abs() < 1e-4
+                && (bg_color[1] - LATTE_BG[1]).abs() < 1e-4
+                && (bg_color[2] - LATTE_BG[2]).abs() < 1e-4;
+            if !is_default_bg {
+                self.draw_rect(cell_x, cell_y, cw, ch, bg_color);
+            }
 
             let c = cell.c;
             if c == ' ' || c == '\t' {
@@ -239,12 +245,13 @@ impl Renderer {
             }
         }
 
-        // Draw cursor
-        let cursor = content.cursor;
-        let cursor_x = offset_x + cursor.point.column.0 as f32 * cw;
-        let cursor_y = offset_y + cursor.point.line.0 as f32 * ch;
-        // Block cursor: semi-transparent overlay
-        self.draw_rect(cursor_x, cursor_y, cw, ch, [0.298, 0.310, 0.412, 0.5]);
+        // Draw cursor (only if visible — handles blink + active pane)
+        if show_cursor {
+            let cursor = content.cursor;
+            let cursor_x = offset_x + cursor.point.column.0 as f32 * cw;
+            let cursor_y = offset_y + cursor.point.line.0 as f32 * ch;
+            self.draw_rect(cursor_x, cursor_y, cw, ch, [0.298, 0.310, 0.412, 0.7]);
+        }
     }
 
     /// Convert vte::ansi::Color to [f32; 4] RGBA.
@@ -285,6 +292,26 @@ impl Renderer {
         }
     }
 
+    /// Draw a rectangular border (4 thin rects forming the edges).
+    pub fn draw_pane_border(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        thickness: f32,
+        color: [f32; 4],
+    ) {
+        // Top edge
+        self.draw_rect(x, y, w, thickness, color);
+        // Bottom edge
+        self.draw_rect(x, y + h - thickness, w, thickness, color);
+        // Left edge
+        self.draw_rect(x, y + thickness, thickness, h - 2.0 * thickness, color);
+        // Right edge
+        self.draw_rect(x + w - thickness, y + thickness, thickness, h - 2.0 * thickness, color);
+    }
+
     /// Flush all batched draw calls.
     pub fn flush(&mut self, width: f32, height: f32) {
         // Backgrounds first (no blending)
@@ -295,23 +322,30 @@ impl Renderer {
     }
 }
 
-/// Convert 256-color index (16-255) to RGB floats.
+/// Map a single 6-level color-cube axis value (0-5) to its xterm byte value.
+/// xterm uses: [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff]
+/// which is: if v == 0 { 0 } else { 55 + v * 40 }.
+fn cube_component(v: u8) -> u8 {
+    if v == 0 { 0 } else { 55 + v * 40 }
+}
+
+/// Convert 256-color index (16-255) to RGB floats using the standard xterm palette.
 fn index_to_rgb(idx: u8) -> [f32; 3] {
     if idx < 16 {
         // Should not reach here, handled by LATTE_COLORS
         return [0.5, 0.5, 0.5];
     }
     if idx < 232 {
-        // Color cube: 6x6x6
-        let idx = idx - 16;
-        let b = (idx % 6) as f32;
-        let g = ((idx / 6) % 6) as f32;
-        let r = (idx / 36) as f32;
-        [r / 5.0, g / 5.0, b / 5.0]
+        // Color cube: 6x6x6 — each axis maps through cube_component()
+        let i = idx - 16;
+        let r = cube_component(i / 36);
+        let g = cube_component((i % 36) / 6);
+        let b = cube_component(i % 6);
+        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
     } else {
-        // Grayscale ramp: 24 shades
-        let shade = (idx - 232) as f32;
-        let v = (8.0 + shade * 10.0) / 255.0;
+        // Grayscale ramp: 24 shades, 8 + index * 10
+        let level = 8 + (idx - 232) as u16 * 10;
+        let v = level as f32 / 255.0;
         [v, v, v]
     }
 }

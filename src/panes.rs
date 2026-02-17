@@ -246,6 +246,7 @@ impl PaneTree {
         }
         let idx = ids.iter().position(|&id| id == self.active).unwrap_or(0);
         self.active = ids[(idx + 1) % ids.len()];
+        self.zoomed = false;
     }
 
     pub fn focus_prev(&mut self) {
@@ -255,6 +256,7 @@ impl PaneTree {
         }
         let idx = ids.iter().position(|&id| id == self.active).unwrap_or(0);
         self.active = if idx == 0 { ids[ids.len() - 1] } else { ids[idx - 1] };
+        self.zoomed = false;
     }
 
     pub fn pane_ids(&self) -> Vec<usize> {

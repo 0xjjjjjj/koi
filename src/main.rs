@@ -38,6 +38,7 @@ struct Koi {
     event_proxy: EventProxy,
     modifiers: ModifiersState,
     cursor_pos: (f64, f64),
+    cursor_blink: std::time::Instant,
 }
 
 impl Koi {
@@ -51,6 +52,7 @@ impl Koi {
             event_proxy,
             modifiers: ModifiersState::empty(),
             cursor_pos: (0.0, 0.0),
+            cursor_blink: std::time::Instant::now(),
         }
     }
 
@@ -302,13 +304,19 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 let tab = tab_manager.active_tab();
                 let active_pane_id = tab.pane_tree.active_pane_id();
 
+                // Cursor blink: 500ms on, 500ms off — only in active pane
+                let blink_on = (self.cursor_blink.elapsed().as_millis() % 1000) < 500;
+
                 for layout in &layouts {
                     if let Some(pane) = tab.panes.get(&layout.pane_id) {
+                        let is_active = layout.pane_id == active_pane_id;
+                        let show_cursor = is_active && blink_on;
                         let term = pane.term.lock();
                         renderer.draw_grid(
                             &*term,
                             layout.x,
                             layout.y + tab_bar_height,
+                            show_cursor,
                         );
                         drop(term);
                     }
@@ -339,6 +347,21 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             );
                         }
                     }
+
+                    // Highlight the active pane with a border
+                    if let Some(active_layout) =
+                        layouts.iter().find(|l| l.pane_id == active_pane_id)
+                    {
+                        let border_color = [0.122, 0.471, 0.706, 1.0];
+                        renderer.draw_pane_border(
+                            active_layout.x,
+                            active_layout.y + tab_bar_height,
+                            active_layout.width,
+                            active_layout.height,
+                            2.0,
+                            border_color,
+                        );
+                    }
                 }
 
                 renderer.flush(w, h);
@@ -348,6 +371,9 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+
+                // Reset cursor blink so it's visible while typing
+                self.cursor_blink = std::time::Instant::now();
 
                 let super_pressed = self.modifiers.super_key();
                 let shift_pressed = self.modifiers.shift_key();
@@ -584,10 +610,11 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             if let Some(text) = clipboard_paste() {
                                 if let Some(tab_manager) = &self.tab_manager {
                                     if let Some(pane) = tab_manager.active_pane() {
-                                        // Bracket paste mode: wrap in \x1b[200~ ... \x1b[201~
+                                        // Bracket paste: sanitize end-sequence to prevent injection
+                                        let sanitized = text.replace("\x1b[201~", "");
                                         let mut bytes = Vec::new();
                                         bytes.extend_from_slice(b"\x1b[200~");
-                                        bytes.extend_from_slice(text.as_bytes());
+                                        bytes.extend_from_slice(sanitized.as_bytes());
                                         bytes.extend_from_slice(b"\x1b[201~");
                                         pane.notifier.send_input(&bytes);
                                     }

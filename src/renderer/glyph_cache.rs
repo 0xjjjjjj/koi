@@ -72,10 +72,23 @@ impl GlyphCache {
             return glyph;
         }
 
-        let rasterized = self
-            .rasterizer
-            .get_glyph(key)
-            .expect("rasterize glyph");
+        let rasterized = match self.rasterizer.get_glyph(key) {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("Failed to rasterize '{}': {}", c, e);
+                return Glyph {
+                    tex_id: 0,
+                    width: 0.0,
+                    height: 0.0,
+                    left: 0.0,
+                    top: 0.0,
+                    uv_x: 0.0,
+                    uv_y: 0.0,
+                    uv_w: 0.0,
+                    uv_h: 0.0,
+                };
+            }
+        };
 
         let buffer: Vec<u8> = match &rasterized.buffer {
             BitmapBuffer::Rgb(data) => {
@@ -88,16 +101,30 @@ impl GlyphCache {
             }
         };
 
-        let glyph = self
-            .atlas
-            .insert(
-                rasterized.width as i32,
-                rasterized.height as i32,
-                &buffer,
-                rasterized.left as f32,
-                rasterized.top as f32,
-            )
-            .expect("atlas insert");
+        let glyph = match self.atlas.insert(
+            rasterized.width as i32,
+            rasterized.height as i32,
+            &buffer,
+            rasterized.left as f32,
+            rasterized.top as f32,
+        ) {
+            Some(g) => g,
+            None => {
+                // Atlas full — return invisible glyph
+                log::warn!("Glyph atlas full, cannot render '{}'", c);
+                return Glyph {
+                    tex_id: 0,
+                    width: 0.0,
+                    height: 0.0,
+                    left: 0.0,
+                    top: 0.0,
+                    uv_x: 0.0,
+                    uv_y: 0.0,
+                    uv_w: 0.0,
+                    uv_h: 0.0,
+                };
+            }
+        };
 
         self.cache.insert(key, glyph);
         glyph
