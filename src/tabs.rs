@@ -58,8 +58,10 @@ impl TabManager {
         let id = self.next_pane_id;
         self.next_pane_id += 1;
 
+        let pane_proxy = event_proxy.with_pane_id(id);
+
         let term_size = TerminalSize::new(cols, rows);
-        let term = Term::new(TermConfig::default(), &term_size, event_proxy.clone());
+        let term = Term::new(TermConfig::default(), &term_size, pane_proxy.clone());
         let term = Arc::new(FairMutex::new(term));
 
         let window_size = WindowSize {
@@ -72,7 +74,7 @@ impl TabManager {
 
         let pty_event_loop = PtyEventLoop::new(
             term.clone(),
-            event_proxy.clone(),
+            pane_proxy,
             pty,
             false,
             false,
@@ -231,6 +233,64 @@ impl TabManager {
     /// Get pane layouts for the active tab.
     pub fn active_layouts(&self, width: f32, height: f32) -> Vec<PaneLayout> {
         self.active_tab().pane_tree.calculate_layouts(width, height)
+    }
+
+    /// Close a specific pane by ID (e.g., when its shell exits).
+    /// Returns true if the app should quit (last pane in last tab).
+    pub fn close_pane_by_id(&mut self, pane_id: usize) -> bool {
+        // Find which tab contains this pane
+        let tab_idx = self.tabs.iter().position(|tab| tab.panes.contains_key(&pane_id));
+        let Some(tab_idx) = tab_idx else {
+            return false; // Pane already gone
+        };
+
+        let tab = &mut self.tabs[tab_idx];
+
+        // If this pane is active, use close_active logic
+        if tab.pane_tree.active_pane_id() == pane_id {
+            // Temporarily switch to this tab for close_active_pane
+            let prev_active = self.active;
+            self.active = tab_idx;
+            let result = self.close_active_pane();
+            // If tab was removed and we were on a different tab, adjust
+            if !result && prev_active < self.tabs.len() && prev_active != tab_idx {
+                self.active = if prev_active > tab_idx {
+                    prev_active - 1
+                } else {
+                    prev_active
+                };
+            }
+            return result;
+        }
+
+        // Pane is not the active one — remove it from the tree and HashMap
+        if tab.pane_tree.pane_count() <= 1 {
+            // Last pane — close the tab
+            if let Some(pane) = tab.panes.remove(&pane_id) {
+                let _ = pane.notifier.0.send(Msg::Shutdown);
+            }
+            if self.tabs.len() <= 1 {
+                return true;
+            }
+            self.tabs.remove(tab_idx);
+            if self.active >= self.tabs.len() {
+                self.active = self.tabs.len() - 1;
+            }
+            return false;
+        }
+
+        // Remove from tree (need to manipulate active temporarily)
+        let saved_active = tab.pane_tree.active_pane_id();
+        // Set active to the target so close_active removes it
+        tab.pane_tree.set_active(pane_id);
+        tab.pane_tree.close_active();
+        // Restore focus
+        tab.pane_tree.set_active(saved_active);
+
+        if let Some(pane) = tab.panes.remove(&pane_id) {
+            let _ = pane.notifier.0.send(Msg::Shutdown);
+        }
+        false
     }
 
     /// Resize all panes in all tabs.

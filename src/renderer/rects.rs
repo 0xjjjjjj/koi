@@ -3,7 +3,7 @@ use crate::gl::types::*;
 
 use super::shader;
 
-const MAX_RECTS: usize = 10_000;
+const MAX_RECTS: usize = 30_000;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

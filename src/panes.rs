@@ -184,6 +184,10 @@ impl PaneTree {
         self.active
     }
 
+    pub fn set_active(&mut self, pane_id: usize) {
+        self.active = pane_id;
+    }
+
     pub fn is_zoomed(&self) -> bool {
         self.zoomed
     }

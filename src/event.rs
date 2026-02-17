@@ -11,19 +11,28 @@ pub enum KoiEvent {
     Wakeup,
     /// Terminal title changed.
     Title(String),
-    /// Child process exited.
-    ChildExit(i32),
+    /// Child process exited (pane_id, exit_code).
+    ChildExit(usize, i32),
 }
 
 /// Bridges alacritty_terminal events to winit's event loop.
 #[derive(Clone)]
 pub struct EventProxy {
     proxy: EventLoopProxy<KoiEvent>,
+    pane_id: usize,
 }
 
 impl EventProxy {
     pub fn new(proxy: EventLoopProxy<KoiEvent>) -> Self {
-        Self { proxy }
+        Self { proxy, pane_id: 0 }
+    }
+
+    /// Create a proxy tagged with a specific pane ID.
+    pub fn with_pane_id(&self, pane_id: usize) -> Self {
+        Self {
+            proxy: self.proxy.clone(),
+            pane_id,
+        }
     }
 }
 
@@ -32,7 +41,7 @@ impl EventListener for EventProxy {
         let koi_event = match event {
             TermEvent::Wakeup => KoiEvent::Wakeup,
             TermEvent::Title(title) => KoiEvent::Title(title),
-            TermEvent::ChildExit(code) => KoiEvent::ChildExit(code),
+            TermEvent::ChildExit(code) => KoiEvent::ChildExit(self.pane_id, code),
             _ => return,
         };
         let _ = self.proxy.send_event(koi_event);
@@ -44,15 +53,11 @@ pub struct Notifier(pub alacritty_terminal::event_loop::EventLoopSender);
 
 impl Notify for Notifier {
     fn notify<B: Into<Cow<'static, [u8]>>>(&self, bytes: B) {
-        let _ = self.sender().send(Msg::Input(bytes.into()));
+        let _ = self.0.send(Msg::Input(bytes.into()));
     }
 }
 
 impl Notifier {
-    fn sender(&self) -> &alacritty_terminal::event_loop::EventLoopSender {
-        &self.0
-    }
-
     pub fn send_input(&self, data: &[u8]) {
         let _ = self.0.send(Msg::Input(Cow::Owned(data.to_vec())));
     }

@@ -54,9 +54,11 @@ impl Koi {
 
     fn grid_size(&self) -> (usize, usize) {
         if let (Some(renderer), Some(window)) = (&self.renderer, &self.window) {
+            let scale = window.scale_factor() as f32;
             let size = window.inner_size();
-            let cols = (size.width as f32 / renderer.cell_width()) as usize;
-            let rows = (size.height as f32 / renderer.cell_height()) as usize;
+            // inner_size() returns physical pixels; cell dimensions are logical
+            let cols = (size.width as f32 / (renderer.cell_width() * scale)) as usize;
+            let rows = (size.height as f32 / (renderer.cell_height() * scale)) as usize;
             (cols.max(2), rows.max(1))
         } else {
             (80, 24)
@@ -153,9 +155,10 @@ impl ApplicationHandler<KoiEvent> for Koi {
         let ch = renderer.cell_height();
         log::info!("Cell size: {}x{}", cw, ch);
 
-        // Calculate terminal grid size
-        let cols = (size.width as f32 / cw) as usize;
-        let rows = (size.height as f32 / ch) as usize;
+        // Calculate terminal grid size (physical pixels / (logical cell * scale))
+        let scale = window.scale_factor() as f32;
+        let cols = (size.width as f32 / (cw * scale)) as usize;
+        let rows = (size.height as f32 / (ch * scale)) as usize;
         let cols = cols.max(2);
         let rows = rows.max(1);
         log::info!("Terminal grid: {}x{}", cols, rows);
@@ -189,13 +192,14 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 self.modifiers = mods.state();
             }
             WindowEvent::Resized(new_size) => {
-                if let (Some(renderer), Some(tab_manager)) =
-                    (&self.renderer, &self.tab_manager)
+                if let (Some(renderer), Some(tab_manager), Some(window)) =
+                    (&self.renderer, &self.tab_manager, &self.window)
                 {
                     let cw = renderer.cell_width();
                     let ch = renderer.cell_height();
-                    let cols = (new_size.width as f32 / cw) as usize;
-                    let rows = (new_size.height as f32 / ch) as usize;
+                    let scale = window.scale_factor() as f32;
+                    let cols = (new_size.width as f32 / (cw * scale)) as usize;
+                    let rows = (new_size.height as f32 / (ch * scale)) as usize;
                     let cols = cols.max(2);
                     let rows = rows.max(1);
                     tab_manager.resize_all(cols, rows, cw, ch);
@@ -527,7 +531,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: KoiEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: KoiEvent) {
         match event {
             KoiEvent::Wakeup => {
                 if let Some(w) = &self.window {
@@ -539,8 +543,17 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     w.set_title(&title);
                 }
             }
-            KoiEvent::ChildExit(code) => {
-                log::info!("Child process exited with code {}", code);
+            KoiEvent::ChildExit(pane_id, code) => {
+                log::info!("Pane {} exited with code {}", pane_id, code);
+                if let Some(tab_manager) = &mut self.tab_manager {
+                    if tab_manager.close_pane_by_id(pane_id) {
+                        event_loop.exit();
+                        return;
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
         }
     }
