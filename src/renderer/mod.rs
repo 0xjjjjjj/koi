@@ -125,6 +125,36 @@ impl Renderer {
         }
     }
 
+    /// Draw the tab bar at the top of the window.
+    pub fn draw_tab_bar(&mut self, tab_manager: &crate::tabs::TabManager, width: f32) {
+        let ch = self.glyph_cache.cell_height;
+        let count = tab_manager.count();
+        let tab_width = width / count as f32;
+
+        let active_bg = [0.937, 0.945, 0.961, 1.0]; // Latte base #eff1f5
+        let inactive_bg = [0.800, 0.816, 0.855, 1.0]; // Latte surface0 #ccd0da
+        let fg = [LATTE_FG[0], LATTE_FG[1], LATTE_FG[2], 1.0];
+
+        for (i, tab) in tab_manager.iter().enumerate() {
+            let x = i as f32 * tab_width;
+            let is_active = i == tab_manager.active_index();
+            let bg = if is_active { active_bg } else { inactive_bg };
+
+            // Tab background
+            self.draw_rect(x, 0.0, tab_width, ch, bg);
+
+            // Tab title
+            let title = &tab.title;
+            let padding = 8.0;
+            self.draw_string(x + padding, 0.0, title, fg, bg);
+
+            // Separator between tabs
+            if i < count - 1 {
+                self.draw_rect(x + tab_width - 1.0, 0.0, 1.0, ch, [0.725, 0.745, 0.792, 1.0]);
+            }
+        }
+    }
+
     /// Draw the terminal grid from alacritty_terminal state.
     pub fn draw_grid<T: EventListener>(
         &mut self,

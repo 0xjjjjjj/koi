@@ -1,17 +1,12 @@
 mod event;
 mod gl;
 mod renderer;
+mod tabs;
 mod terminal;
 
 use std::borrow::Cow;
 use std::num::NonZeroU32;
-use std::sync::Arc;
 
-use alacritty_terminal::event::WindowSize;
-use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg};
-use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config as TermConfig, Term};
-use alacritty_terminal::tty;
 use glutin::config::ConfigTemplateBuilder;
 use glutin::context::{ContextApi, ContextAttributesBuilder, Version};
 use glutin::display::GetGlDisplay;
@@ -22,21 +17,21 @@ use raw_window_handle::HasWindowHandle;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes};
 
-use event::{EventProxy, KoiEvent, Notifier};
+use event::{EventProxy, KoiEvent};
 use renderer::Renderer;
-use terminal::TerminalSize;
+use tabs::TabManager;
 
 struct Koi {
     window: Option<Window>,
     gl_context: Option<glutin::context::PossiblyCurrentContext>,
     gl_surface: Option<glutin::surface::Surface<WindowSurface>>,
     renderer: Option<Renderer>,
-    terminal: Option<Arc<FairMutex<Term<EventProxy>>>>,
-    notifier: Option<Notifier>,
+    tab_manager: Option<TabManager>,
     event_proxy: EventProxy,
+    modifiers: ModifiersState,
 }
 
 impl Koi {
@@ -46,9 +41,20 @@ impl Koi {
             gl_context: None,
             gl_surface: None,
             renderer: None,
-            terminal: None,
-            notifier: None,
+            tab_manager: None,
             event_proxy,
+            modifiers: ModifiersState::empty(),
+        }
+    }
+
+    fn grid_size(&self) -> (usize, usize) {
+        if let (Some(renderer), Some(window)) = (&self.renderer, &self.window) {
+            let size = window.inner_size();
+            let cols = (size.width as f32 / renderer.cell_width()) as usize;
+            let rows = (size.height as f32 / renderer.cell_height()) as usize;
+            (cols.max(2), rows.max(1))
+        } else {
+            (80, 24)
         }
     }
 }
@@ -149,36 +155,11 @@ impl ApplicationHandler<KoiEvent> for Koi {
         let rows = rows.max(1);
         log::info!("Terminal grid: {}x{}", cols, rows);
 
-        // Create terminal
-        let term_size = TerminalSize::new(cols, rows);
-        let term = Term::new(TermConfig::default(), &term_size, self.event_proxy.clone());
-        let term = Arc::new(FairMutex::new(term));
-
-        // Create PTY
-        let window_size = WindowSize {
-            num_lines: rows as u16,
-            num_cols: cols as u16,
-            cell_width: cw as u16,
-            cell_height: ch as u16,
-        };
-        let pty = tty::new(&tty::Options::default(), window_size, 0).expect("create PTY");
-
-        // Create PTY event loop (background thread reads PTY output)
-        let pty_event_loop = PtyEventLoop::new(
-            term.clone(),
-            self.event_proxy.clone(),
-            pty,
-            false,
-            false,
-        )
-        .expect("create PTY event loop");
-
-        let notifier = Notifier(pty_event_loop.channel());
-        let _pty_thread = pty_event_loop.spawn();
+        // Create tab manager with one initial tab
+        let tab_manager = TabManager::new(cols, rows, cw, ch, &self.event_proxy);
 
         self.renderer = Some(renderer);
-        self.terminal = Some(term);
-        self.notifier = Some(notifier);
+        self.tab_manager = Some(tab_manager);
         self.window = Some(window);
         self.gl_context = Some(gl_context);
         self.gl_surface = Some(gl_surface);
@@ -197,14 +178,14 @@ impl ApplicationHandler<KoiEvent> for Koi {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(notifier) = &self.notifier {
-                    let _ = notifier.0.send(Msg::Shutdown);
-                }
                 event_loop.exit();
             }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
             WindowEvent::Resized(new_size) => {
-                if let (Some(renderer), Some(terminal), Some(notifier)) =
-                    (&self.renderer, &self.terminal, &self.notifier)
+                if let (Some(renderer), Some(tab_manager)) =
+                    (&self.renderer, &self.tab_manager)
                 {
                     let cw = renderer.cell_width();
                     let ch = renderer.cell_height();
@@ -212,16 +193,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     let rows = (new_size.height as f32 / ch) as usize;
                     let cols = cols.max(2);
                     let rows = rows.max(1);
-
-                    let term_size = TerminalSize::new(cols, rows);
-                    terminal.lock().resize(term_size);
-
-                    notifier.send_resize(WindowSize {
-                        num_lines: rows as u16,
-                        num_cols: cols as u16,
-                        cell_width: cw as u16,
-                        cell_height: ch as u16,
-                    });
+                    tab_manager.resize_all(cols, rows, cw, ch);
                 }
 
                 // Resize GL surface
@@ -248,7 +220,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 let Some(context) = &self.gl_context else {
                     return;
                 };
-                let Some(terminal) = &self.terminal else {
+                let Some(tab_manager) = &self.tab_manager else {
                     return;
                 };
 
@@ -262,10 +234,23 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     gl::Clear(gl::COLOR_BUFFER_BIT);
                 }
 
-                // Render terminal grid
-                let term = terminal.lock();
-                renderer.draw_grid(&*term, 0.0, 0.0);
-                drop(term);
+                // Draw tab bar if multiple tabs
+                if tab_manager.count() > 1 {
+                    let ch = renderer.cell_height();
+                    renderer.draw_tab_bar(tab_manager, w);
+
+                    // Render active terminal grid below tab bar
+                    let tab = tab_manager.active_tab();
+                    let term = tab.term.lock();
+                    renderer.draw_grid(&*term, 0.0, ch);
+                    drop(term);
+                } else {
+                    // Single tab: no tab bar, full viewport
+                    let tab = tab_manager.active_tab();
+                    let term = tab.term.lock();
+                    renderer.draw_grid(&*term, 0.0, 0.0);
+                    drop(term);
+                }
 
                 renderer.flush(w, h);
                 surface.swap_buffers(context).unwrap();
@@ -275,11 +260,85 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     return;
                 }
 
-                let Some(notifier) = &self.notifier else {
+                let super_pressed = self.modifiers.super_key();
+                let shift_pressed = self.modifiers.shift_key();
+
+                // Handle tab keybindings (Cmd+...)
+                if super_pressed {
+                    match event.logical_key {
+                        // Cmd+T: New tab
+                        Key::Character(ref s) if s == "t" => {
+                            let (cols, rows) = self.grid_size();
+                            let cw = self.renderer.as_ref().map(|r| r.cell_width()).unwrap_or(8.0);
+                            let ch = self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(18.0);
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                tab_manager.add_tab(cols, rows, cw, ch, &self.event_proxy);
+                                log::info!("New tab (total: {})", tab_manager.count());
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+W: Close tab
+                        Key::Character(ref s) if s == "w" => {
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                if tab_manager.close_active() {
+                                    event_loop.exit();
+                                    return;
+                                }
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+Shift+[ : Previous tab
+                        Key::Character(ref s) if s == "{" && shift_pressed => {
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                tab_manager.prev_tab();
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+Shift+] : Next tab
+                        Key::Character(ref s) if s == "}" && shift_pressed => {
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                tab_manager.next_tab();
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+1-9: Go to tab
+                        Key::Character(ref s)
+                            if s.len() == 1
+                                && s.chars().next().unwrap().is_ascii_digit() =>
+                        {
+                            let digit = s.chars().next().unwrap() as usize - '0' as usize;
+                            if digit >= 1 {
+                                if let Some(tab_manager) = &mut self.tab_manager {
+                                    tab_manager.goto_tab(digit - 1);
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Forward to active tab's PTY
+                let Some(tab_manager) = &self.tab_manager else {
                     return;
                 };
+                let notifier = &tab_manager.active_tab().notifier;
 
-                // Convert key events to bytes for the PTY
                 let bytes: Option<Cow<'static, [u8]>> = match event.logical_key {
                     Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
                     Key::Named(NamedKey::Backspace) => Some(Cow::Borrowed(b"\x7f")),
@@ -295,12 +354,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     Key::Named(NamedKey::PageUp) => Some(Cow::Borrowed(b"\x1b[5~")),
                     Key::Named(NamedKey::PageDown) => Some(Cow::Borrowed(b"\x1b[6~")),
                     Key::Character(ref s) => {
-                        // Handle Ctrl+key combos
-                        if event.state == ElementState::Pressed {
-                            Some(Cow::Owned(s.as_bytes().to_vec()))
-                        } else {
-                            None
-                        }
+                        Some(Cow::Owned(s.as_bytes().to_vec()))
                     }
                     _ => None,
                 };
@@ -316,7 +370,6 @@ impl ApplicationHandler<KoiEvent> for Koi {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: KoiEvent) {
         match event {
             KoiEvent::Wakeup => {
-                // Terminal content changed, request redraw
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
