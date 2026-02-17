@@ -92,12 +92,15 @@ impl GlyphCache {
 
         let buffer: Vec<u8> = match &rasterized.buffer {
             BitmapBuffer::Rgb(data) => {
-                // Convert RGB to single-channel alpha
-                data.chunks(3).map(|rgb| rgb[0]).collect()
+                // Keep RGB channels for subpixel LCD antialiasing
+                data.clone()
             }
             BitmapBuffer::Rgba(data) => {
-                // Use alpha channel
-                data.chunks(4).map(|rgba| rgba[3]).collect()
+                // Extract RGB channels (drop alpha) for subpixel rendering
+                data.chunks(4)
+                    .flat_map(|rgba| &rgba[..3])
+                    .copied()
+                    .collect()
             }
         };
 

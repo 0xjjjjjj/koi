@@ -82,6 +82,7 @@ struct Koi {
     cursor_pos: (f64, f64),
     cursor_blink: std::time::Instant,
     mouse_left_pressed: bool,
+    needs_redraw: bool,
 }
 
 impl Koi {
@@ -97,6 +98,7 @@ impl Koi {
             cursor_pos: (0.0, 0.0),
             cursor_blink: std::time::Instant::now(),
             mouse_left_pressed: false,
+            needs_redraw: true,
         }
     }
 
@@ -245,6 +247,11 @@ impl ApplicationHandler<KoiEvent> for Koi {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        // Mark dirty so RedrawRequested actually renders
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.needs_redraw = true;
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -254,34 +261,63 @@ impl ApplicationHandler<KoiEvent> for Koi {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
-                // Update selection while dragging
-                if self.mouse_left_pressed {
-                    if let (Some(tab_manager), Some(renderer), Some(window)) =
-                        (&self.tab_manager, &self.renderer, &self.window)
-                    {
-                        let scale = window.scale_factor() as f32;
-                        let cw = renderer.cell_width();
-                        let ch = renderer.cell_height();
-                        let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
-                        let cx = position.x as f32 * scale;
-                        let cy = position.y as f32 * scale - tab_bar_h;
-                        let size = window.inner_size();
-                        let viewport_h = size.height as f32 - tab_bar_h;
-                        let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
-                        let active_id = tab_manager.active_tab().pane_tree.active_pane_id();
-                        if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
-                            let col = ((cx - layout.x) / cw).max(0.0) as usize;
-                            let line = ((cy - layout.y) / ch).max(0.0) as i32;
-                            let point = alacritty_terminal::index::Point::new(
-                                alacritty_terminal::index::Line(line),
-                                alacritty_terminal::index::Column(col),
-                            );
-                            let side = if ((cx - layout.x) % cw) > cw / 2.0 {
-                                alacritty_terminal::index::Side::Right
-                            } else {
-                                alacritty_terminal::index::Side::Left
-                            };
+
+                if let (Some(tab_manager), Some(renderer), Some(window)) =
+                    (&self.tab_manager, &self.renderer, &self.window)
+                {
+                    let scale = window.scale_factor() as f32;
+                    let cw = renderer.cell_width();
+                    let ch = renderer.cell_height();
+                    let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
+                    let cx = position.x as f32 * scale;
+                    let cy = position.y as f32 * scale - tab_bar_h;
+                    let size = window.inner_size();
+                    let viewport_h = size.height as f32 - tab_bar_h;
+                    let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
+                    let active_id = tab_manager.active_tab().pane_tree.active_pane_id();
+
+                    if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
+                        let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
+                        let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
+
+                        // Check if app wants mouse events
+                        if let Some(pane) = tab_manager.active_pane() {
+                            use alacritty_terminal::term::TermMode;
+                            let term = pane.term.lock();
+                            let mode = term.mode();
+                            let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
+                            let sgr = mode.contains(TermMode::SGR_MOUSE);
+                            let motion = mode.contains(TermMode::MOUSE_MOTION)
+                                || mode.contains(TermMode::MOUSE_DRAG);
+                            drop(term);
+
+                            if mouse_mode && self.mouse_left_pressed && (motion) {
+                                // SGR mouse drag: button 32 = motion + left
+                                if sgr {
+                                    let seq = format!("\x1b[<32;{};{}M", col, line);
+                                    pane.notifier.send_input(seq.as_bytes());
+                                }
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+
+                        // Normal selection drag
+                        if self.mouse_left_pressed {
                             if let Some(pane) = tab_manager.active_pane() {
+                                let grid_col = col.saturating_sub(1);
+                                let grid_line = (line as i32).saturating_sub(1);
+                                let point = alacritty_terminal::index::Point::new(
+                                    alacritty_terminal::index::Line(grid_line),
+                                    alacritty_terminal::index::Column(grid_col),
+                                );
+                                let side = if ((cx - layout.x) % cw) > cw / 2.0 {
+                                    alacritty_terminal::index::Side::Right
+                                } else {
+                                    alacritty_terminal::index::Side::Left
+                                };
                                 let mut term = pane.term.lock();
                                 if let Some(ref mut sel) = term.selection {
                                     sel.update(point, side);
@@ -321,12 +357,33 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             && cy < layout.y + layout.height
                         {
                             tab_manager.focus_pane(layout.pane_id);
-                            // Start selection
-                            let col = ((cx - layout.x) / cw).max(0.0) as usize;
-                            let line = ((cy - layout.y) / ch).max(0.0) as i32;
+                            let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
+                            let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
+
+                            // Mouse reporting: send SGR press if app wants mouse events
+                            if let Some(pane) = tab_manager.active_pane() {
+                                use alacritty_terminal::term::TermMode;
+                                let term = pane.term.lock();
+                                let mode = term.mode();
+                                let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
+                                let sgr = mode.contains(TermMode::SGR_MOUSE);
+                                drop(term);
+                                if mouse_mode && sgr {
+                                    let seq = format!("\x1b[<0;{};{}M", col, line);
+                                    pane.notifier.send_input(seq.as_bytes());
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                    break;
+                                }
+                            }
+
+                            // Start selection (normal mode)
+                            let grid_col = col.saturating_sub(1);
+                            let grid_line = (line as i32).saturating_sub(1);
                             let point = alacritty_terminal::index::Point::new(
-                                alacritty_terminal::index::Line(line),
-                                alacritty_terminal::index::Column(col),
+                                alacritty_terminal::index::Line(grid_line),
+                                alacritty_terminal::index::Column(grid_col),
                             );
                             let side = if ((cx - layout.x) % cw) > cw / 2.0 {
                                 alacritty_terminal::index::Side::Right
@@ -355,6 +412,37 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 ..
             } => {
                 self.mouse_left_pressed = false;
+                // Mouse reporting: send SGR release if app wants mouse events
+                if let (Some(tab_manager), Some(renderer), Some(window)) =
+                    (&self.tab_manager, &self.renderer, &self.window)
+                {
+                    if let Some(pane) = tab_manager.active_pane() {
+                        use alacritty_terminal::term::TermMode;
+                        let term = pane.term.lock();
+                        let mode = term.mode();
+                        let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
+                        let sgr = mode.contains(TermMode::SGR_MOUSE);
+                        drop(term);
+                        if mouse_mode && sgr {
+                            let scale = window.scale_factor() as f32;
+                            let cw = renderer.cell_width();
+                            let ch = renderer.cell_height();
+                            let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
+                            let cx = self.cursor_pos.0 as f32 * scale;
+                            let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+                            let size = window.inner_size();
+                            let viewport_h = size.height as f32 - tab_bar_h;
+                            let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
+                            let active_id = tab_manager.active_tab().pane_tree.active_pane_id();
+                            if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
+                                let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
+                                let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
+                                let seq = format!("\x1b[<0;{};{}m", col, line);
+                                pane.notifier.send_input(seq.as_bytes());
+                            }
+                        }
+                    }
+                }
             }
             WindowEvent::Resized(new_size) => {
                 if let (Some(renderer), Some(tab_manager)) =
@@ -382,6 +470,11 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
             }
             WindowEvent::RedrawRequested => {
+                if !self.needs_redraw {
+                    return;
+                }
+                self.needs_redraw = false;
+
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
@@ -841,8 +934,52 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 if scroll_lines != 0 {
                     if let Some(tab_manager) = &self.tab_manager {
                         if let Some(pane) = tab_manager.active_pane() {
-                            use alacritty_terminal::grid::Scroll;
-                            pane.term.lock().scroll_display(Scroll::Delta(scroll_lines));
+                            // Mouse reporting: send scroll as button 64/65 if app wants it
+                            use alacritty_terminal::term::TermMode;
+                            let term = pane.term.lock();
+                            let mode = term.mode();
+                            let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
+                            let sgr = mode.contains(TermMode::SGR_MOUSE);
+                            drop(term);
+
+                            if mouse_mode && sgr {
+                                if let (Some(renderer), Some(window)) =
+                                    (&self.renderer, &self.window)
+                                {
+                                    let scale = window.scale_factor() as f32;
+                                    let cw = renderer.cell_width();
+                                    let ch = renderer.cell_height();
+                                    let tab_bar_h =
+                                        if tab_manager.count() > 1 { ch } else { 0.0 };
+                                    let cx = self.cursor_pos.0 as f32 * scale;
+                                    let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+                                    let size = window.inner_size();
+                                    let viewport_h = size.height as f32 - tab_bar_h;
+                                    let layouts =
+                                        tab_manager.active_layouts(size.width as f32, viewport_h);
+                                    let active_id =
+                                        tab_manager.active_tab().pane_tree.active_pane_id();
+                                    if let Some(layout) =
+                                        layouts.iter().find(|l| l.pane_id == active_id)
+                                    {
+                                        let col =
+                                            ((cx - layout.x) / cw).max(0.0) as usize + 1;
+                                        let line =
+                                            ((cy - layout.y) / ch).max(0.0) as usize + 1;
+                                        // button 64 = scroll up, 65 = scroll down
+                                        let button = if scroll_lines > 0 { 64 } else { 65 };
+                                        let count = scroll_lines.unsigned_abs();
+                                        for _ in 0..count {
+                                            let seq =
+                                                format!("\x1b[<{};{};{}M", button, col, line);
+                                            pane.notifier.send_input(seq.as_bytes());
+                                        }
+                                    }
+                                }
+                            } else {
+                                use alacritty_terminal::grid::Scroll;
+                                pane.term.lock().scroll_display(Scroll::Delta(scroll_lines));
+                            }
                         }
                     }
                     if let Some(w) = &self.window {
@@ -855,6 +992,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: KoiEvent) {
+        self.needs_redraw = true;
         match event {
             KoiEvent::Wakeup => {
                 if let Some(w) = &self.window {

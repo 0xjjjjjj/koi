@@ -39,11 +39,11 @@ impl Atlas {
             gl::TexImage2D(
                 gl::TEXTURE_2D,
                 0,
-                gl::RED as i32,
+                gl::RGB8 as i32,
                 size,
                 size,
                 0,
-                gl::RED,
+                gl::RGB,
                 gl::UNSIGNED_BYTE,
                 std::ptr::null(),
             );
@@ -104,6 +104,7 @@ impl Atlas {
 
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, self.tex_id);
+            gl::PixelStorei(gl::UNPACK_ALIGNMENT, 1);
             gl::TexSubImage2D(
                 gl::TEXTURE_2D,
                 0,
@@ -111,7 +112,7 @@ impl Atlas {
                 y,
                 glyph_width,
                 glyph_height,
-                gl::RED,
+                gl::RGB,
                 gl::UNSIGNED_BYTE,
                 buffer.as_ptr() as *const _,
             );

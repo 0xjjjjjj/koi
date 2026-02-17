@@ -58,11 +58,13 @@ uniform sampler2D uAtlas;
 in vec2 vUV;
 flat in vec4 vColor;
 
-out vec4 FragColor;
+layout(location = 0, index = 0) out vec4 FragColor;
+layout(location = 0, index = 1) out vec4 BlendFactor;
 
 void main() {
-    float alpha = texture(uAtlas, vUV).r;
-    FragColor = vec4(vColor.rgb, vColor.a * alpha);
+    vec3 coverage = texture(uAtlas, vUV).rgb;
+    FragColor = vec4(vColor.rgb * coverage, 1.0);
+    BlendFactor = vec4(coverage, 1.0);
 }
 "#;
 
@@ -182,7 +184,7 @@ impl TextRenderer {
             gl::BindTexture(gl::TEXTURE_2D, tex_id);
 
             gl::Enable(gl::BLEND);
-            gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+            gl::BlendFunc(gl::SRC1_COLOR, gl::ONE_MINUS_SRC1_COLOR);
 
             gl::BindVertexArray(self.vao);
             gl::BindBuffer(gl::ARRAY_BUFFER, self.instance_vbo);
