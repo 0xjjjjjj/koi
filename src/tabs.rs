@@ -185,7 +185,7 @@ impl TabManager {
         tab.panes.get(&pane_id)
     }
 
-    /// Split the active pane in the active tab.
+    /// Split the active pane in the active tab, then resize all panes to fit.
     pub fn split_active(
         &mut self,
         split: Split,
@@ -193,12 +193,16 @@ impl TabManager {
         rows: usize,
         cell_width: f32,
         cell_height: f32,
+        viewport_width: f32,
+        viewport_height: f32,
         event_proxy: &EventProxy,
     ) {
         let (new_id, pane) = self.spawn_pane(cols, rows, cell_width, cell_height, event_proxy);
         let tab = &mut self.tabs[self.active];
         tab.pane_tree.split_active(split, new_id);
         tab.panes.insert(new_id, pane);
+        // Resize all panes to their actual layout dimensions
+        Self::resize_tab_panes(tab, viewport_width, viewport_height, cell_width, cell_height);
     }
 
     /// Close the active pane in the active tab. Returns true if the whole tab should close.
@@ -220,6 +224,10 @@ impl TabManager {
 
     pub fn toggle_zoom(&mut self) {
         self.tabs[self.active].pane_tree.toggle_zoom();
+    }
+
+    pub fn focus_pane(&mut self, pane_id: usize) {
+        self.tabs[self.active].pane_tree.set_active(pane_id);
     }
 
     pub fn focus_next_pane(&mut self) {
@@ -293,20 +301,31 @@ impl TabManager {
         false
     }
 
-    /// Resize all panes in all tabs.
-    pub fn resize_all(&self, cols: usize, rows: usize, cell_width: f32, cell_height: f32) {
-        let window_size = WindowSize {
-            num_lines: rows as u16,
-            num_cols: cols as u16,
-            cell_width: cell_width as u16,
-            cell_height: cell_height as u16,
-        };
-
-        for tab in &self.tabs {
-            for pane in tab.panes.values() {
+    /// Resize panes in a single tab based on their layout dimensions.
+    fn resize_tab_panes(tab: &Tab, width: f32, height: f32, cell_width: f32, cell_height: f32) {
+        let layouts = tab.pane_tree.calculate_layouts(width, height);
+        for layout in &layouts {
+            if let Some(pane) = tab.panes.get(&layout.pane_id) {
+                let cols = (layout.width / cell_width) as usize;
+                let rows = (layout.height / cell_height) as usize;
+                let cols = cols.max(2);
+                let rows = rows.max(1);
                 pane.term.lock().resize(TerminalSize::new(cols, rows));
+                let window_size = WindowSize {
+                    num_lines: rows as u16,
+                    num_cols: cols as u16,
+                    cell_width: cell_width as u16,
+                    cell_height: cell_height as u16,
+                };
                 pane.notifier.send_resize(window_size);
             }
+        }
+    }
+
+    /// Resize all panes in all tabs using per-pane layout dimensions.
+    pub fn resize_all(&self, width: f32, height: f32, cell_width: f32, cell_height: f32) {
+        for tab in &self.tabs {
+            Self::resize_tab_panes(tab, width, height, cell_width, cell_height);
         }
     }
 }

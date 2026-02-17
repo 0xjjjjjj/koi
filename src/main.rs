@@ -37,6 +37,7 @@ struct Koi {
     tab_manager: Option<TabManager>,
     event_proxy: EventProxy,
     modifiers: ModifiersState,
+    cursor_pos: (f64, f64),
 }
 
 impl Koi {
@@ -49,6 +50,7 @@ impl Koi {
             tab_manager: None,
             event_proxy,
             modifiers: ModifiersState::empty(),
+            cursor_pos: (0.0, 0.0),
         }
     }
 
@@ -191,18 +193,54 @@ impl ApplicationHandler<KoiEvent> for Koi {
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = (position.x, position.y);
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: winit::event::MouseButton::Left,
+                ..
+            } => {
+                // Click to focus pane
+                if let (Some(tab_manager), Some(window)) =
+                    (&mut self.tab_manager, &self.window)
+                {
+                    let size = window.inner_size();
+                    let tab_bar_h = if tab_manager.count() > 1 {
+                        self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(18.0)
+                    } else {
+                        0.0
+                    };
+                    let scale = window.scale_factor() as f32;
+                    // cursor_pos is in logical pixels, layouts are in physical
+                    let cx = self.cursor_pos.0 as f32 * scale;
+                    let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+                    let viewport_h = size.height as f32 - tab_bar_h;
+                    let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
+                    for layout in &layouts {
+                        if cx >= layout.x
+                            && cx < layout.x + layout.width
+                            && cy >= layout.y
+                            && cy < layout.y + layout.height
+                        {
+                            tab_manager.focus_pane(layout.pane_id);
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             WindowEvent::Resized(new_size) => {
-                if let (Some(renderer), Some(tab_manager), Some(window)) =
-                    (&self.renderer, &self.tab_manager, &self.window)
+                if let (Some(renderer), Some(tab_manager)) =
+                    (&self.renderer, &self.tab_manager)
                 {
                     let cw = renderer.cell_width();
                     let ch = renderer.cell_height();
-                    let scale = window.scale_factor() as f32;
-                    let cols = (new_size.width as f32 / (cw * scale)) as usize;
-                    let rows = (new_size.height as f32 / (ch * scale)) as usize;
-                    let cols = cols.max(2);
-                    let rows = rows.max(1);
-                    tab_manager.resize_all(cols, rows, cw, ch);
+                    let w = new_size.width as f32;
+                    let h = new_size.height as f32;
+                    tab_manager.resize_all(w, h, cw, ch);
                 }
 
                 // Resize GL surface
@@ -306,6 +344,91 @@ impl ApplicationHandler<KoiEvent> for Koi {
 
                 let super_pressed = self.modifiers.super_key();
                 let shift_pressed = self.modifiers.shift_key();
+                let ctrl_pressed = self.modifiers.control_key();
+                let alt_pressed = self.modifiers.alt_key();
+
+                // Ctrl+Tab / Ctrl+Shift+Tab: Cycle tabs
+                if ctrl_pressed && matches!(event.logical_key, Key::Named(NamedKey::Tab)) {
+                    if let Some(tab_manager) = &mut self.tab_manager {
+                        if shift_pressed {
+                            tab_manager.prev_tab();
+                        } else {
+                            tab_manager.next_tab();
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
+                    return;
+                }
+
+                // Cmd+Option+Arrow: Directional pane navigation
+                if super_pressed && alt_pressed {
+                    match event.logical_key {
+                        Key::Named(NamedKey::ArrowLeft)
+                        | Key::Named(NamedKey::ArrowRight)
+                        | Key::Named(NamedKey::ArrowUp)
+                        | Key::Named(NamedKey::ArrowDown) => {
+                            if let (Some(tab_manager), Some(window)) =
+                                (&mut self.tab_manager, &self.window)
+                            {
+                                let size = window.inner_size();
+                                let tab_bar_h = if tab_manager.count() > 1 {
+                                    self.renderer
+                                        .as_ref()
+                                        .map(|r| r.cell_height())
+                                        .unwrap_or(18.0)
+                                } else {
+                                    0.0
+                                };
+                                let vp_h = size.height as f32 - tab_bar_h;
+                                let layouts =
+                                    tab_manager.active_layouts(size.width as f32, vp_h);
+                                let active_id =
+                                    tab_manager.active_tab().pane_tree.active_pane_id();
+
+                                // Find active pane's center
+                                if let Some(active_layout) =
+                                    layouts.iter().find(|l| l.pane_id == active_id)
+                                {
+                                    let ax = active_layout.x + active_layout.width / 2.0;
+                                    let ay = active_layout.y + active_layout.height / 2.0;
+
+                                    let target = layouts
+                                        .iter()
+                                        .filter(|l| l.pane_id != active_id)
+                                        .filter(|l| {
+                                            let lx = l.x + l.width / 2.0;
+                                            let ly = l.y + l.height / 2.0;
+                                            match event.logical_key {
+                                                Key::Named(NamedKey::ArrowLeft) => lx < ax,
+                                                Key::Named(NamedKey::ArrowRight) => lx > ax,
+                                                Key::Named(NamedKey::ArrowUp) => ly < ay,
+                                                Key::Named(NamedKey::ArrowDown) => ly > ay,
+                                                _ => false,
+                                            }
+                                        })
+                                        .min_by(|a, b| {
+                                            let da = (a.x + a.width / 2.0 - ax).powi(2)
+                                                + (a.y + a.height / 2.0 - ay).powi(2);
+                                            let db = (b.x + b.width / 2.0 - ax).powi(2)
+                                                + (b.y + b.height / 2.0 - ay).powi(2);
+                                            da.partial_cmp(&db).unwrap()
+                                        });
+
+                                    if let Some(target) = target {
+                                        tab_manager.focus_pane(target.pane_id);
+                                    }
+                                }
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
 
                 // Handle tab keybindings (Cmd+...)
                 if super_pressed {
@@ -378,10 +501,13 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             let (cols, rows) = self.grid_size();
                             let cw = self.renderer.as_ref().map(|r| r.cell_width()).unwrap_or(8.0);
                             let ch = self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(18.0);
+                            let vp = self.window.as_ref().map(|w| w.inner_size()).unwrap_or_default();
                             if let Some(tab_manager) = &mut self.tab_manager {
                                 tab_manager.split_active(
                                     panes::Split::Vertical,
-                                    cols, rows, cw, ch, &self.event_proxy,
+                                    cols, rows, cw, ch,
+                                    vp.width as f32, vp.height as f32,
+                                    &self.event_proxy,
                                 );
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
@@ -394,10 +520,13 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             let (cols, rows) = self.grid_size();
                             let cw = self.renderer.as_ref().map(|r| r.cell_width()).unwrap_or(8.0);
                             let ch = self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(18.0);
+                            let vp = self.window.as_ref().map(|w| w.inner_size()).unwrap_or_default();
                             if let Some(tab_manager) = &mut self.tab_manager {
                                 tab_manager.split_active(
                                     panes::Split::Horizontal,
-                                    cols, rows, cw, ch, &self.event_proxy,
+                                    cols, rows, cw, ch,
+                                    vp.width as f32, vp.height as f32,
+                                    &self.event_proxy,
                                 );
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
@@ -476,9 +605,6 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     return;
                 };
                 let notifier = &pane.notifier;
-
-                let ctrl_pressed = self.modifiers.control_key();
-                let alt_pressed = self.modifiers.alt_key();
 
                 let bytes: Option<Cow<'static, [u8]>> = match event.logical_key {
                     Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
