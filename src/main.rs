@@ -1,4 +1,5 @@
 mod gl;
+mod renderer;
 
 use std::num::NonZeroU32;
 
@@ -14,10 +15,13 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes};
 
+use renderer::Renderer;
+
 struct Koi {
     window: Option<Window>,
     gl_context: Option<glutin::context::PossiblyCurrentContext>,
     gl_surface: Option<glutin::surface::Surface<WindowSurface>>,
+    renderer: Option<Renderer>,
 }
 
 impl Koi {
@@ -26,6 +30,7 @@ impl Koi {
             window: None,
             gl_context: None,
             gl_surface: None,
+            renderer: None,
         }
     }
 }
@@ -107,21 +112,28 @@ impl ApplicationHandler for Koi {
         // Log GL info
         unsafe {
             let version = std::ffi::CStr::from_ptr(gl::GetString(gl::VERSION) as *const _);
-            let renderer = std::ffi::CStr::from_ptr(gl::GetString(gl::RENDERER) as *const _);
+            let renderer_str = std::ffi::CStr::from_ptr(gl::GetString(gl::RENDERER) as *const _);
             log::info!("OpenGL version: {:?}", version);
-            log::info!("GPU renderer: {:?}", renderer);
+            log::info!("GPU renderer: {:?}", renderer_str);
         }
 
-        // Clear to Catppuccin Latte base color (#eff1f5)
-        unsafe {
-            gl::ClearColor(0.937, 0.945, 0.961, 1.0);
-            gl::Clear(gl::COLOR_BUFFER_BIT);
-        }
-        gl_surface.swap_buffers(&gl_context).unwrap();
+        // Create renderer after GL is initialized
+        let renderer = Renderer::new("IBM Plex Mono", 14.0);
+        log::info!(
+            "Cell size: {}x{}",
+            renderer.cell_width(),
+            renderer.cell_height()
+        );
 
+        self.renderer = Some(renderer);
         self.window = Some(window);
         self.gl_context = Some(gl_context);
         self.gl_surface = Some(gl_surface);
+
+        // Trigger initial draw
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     fn window_event(
@@ -133,14 +145,51 @@ impl ApplicationHandler for Koi {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                if let (Some(surface), Some(context)) =
-                    (&self.gl_surface, &self.gl_context)
-                {
-                    unsafe {
-                        gl::Clear(gl::COLOR_BUFFER_BIT);
-                    }
-                    surface.swap_buffers(context).unwrap();
+                let Some(renderer) = &mut self.renderer else {
+                    return;
+                };
+                let Some(window) = &self.window else { return };
+                let Some(surface) = &self.gl_surface else {
+                    return;
+                };
+                let Some(context) = &self.gl_context else {
+                    return;
+                };
+
+                let size = window.inner_size();
+                let w = size.width as f32;
+                let h = size.height as f32;
+
+                unsafe {
+                    gl::Viewport(0, 0, size.width as i32, size.height as i32);
+                    gl::ClearColor(0.937, 0.945, 0.961, 1.0);
+                    gl::Clear(gl::COLOR_BUFFER_BIT);
                 }
+
+                // Catppuccin Latte colors
+                let fg = [0.298, 0.310, 0.412, 1.0]; // #4c4f69
+                let bg = [0.800, 0.816, 0.855, 1.0]; // #ccd0da
+
+                // Test: render some text
+                renderer.draw_string(10.0, 10.0, "Hello from Koi!", fg, bg);
+                renderer.draw_string(
+                    10.0,
+                    10.0 + renderer.cell_height(),
+                    "GPU-accelerated terminal emulator",
+                    fg,
+                    [0.937, 0.945, 0.961, 1.0], // transparent bg
+                );
+                renderer.draw_string(
+                    10.0,
+                    10.0 + renderer.cell_height() * 2.0,
+                    "$ cargo build --release",
+                    [0.247, 0.627, 0.169, 1.0], // green #40a02b
+                    [0.937, 0.945, 0.961, 1.0],
+                );
+
+                renderer.flush(w, h);
+
+                surface.swap_buffers(context).unwrap();
             }
             _ => {}
         }
