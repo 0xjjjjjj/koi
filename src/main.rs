@@ -1,5 +1,6 @@
 mod event;
 mod gl;
+mod panes;
 mod renderer;
 mod tabs;
 mod terminal;
@@ -234,22 +235,57 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     gl::Clear(gl::COLOR_BUFFER_BIT);
                 }
 
-                // Draw tab bar if multiple tabs
-                if tab_manager.count() > 1 {
-                    let ch = renderer.cell_height();
+                // Calculate viewport offset for tab bar
+                let tab_bar_height = if tab_manager.count() > 1 {
                     renderer.draw_tab_bar(tab_manager, w);
-
-                    // Render active terminal grid below tab bar
-                    let tab = tab_manager.active_tab();
-                    let term = tab.term.lock();
-                    renderer.draw_grid(&*term, 0.0, ch);
-                    drop(term);
+                    renderer.cell_height()
                 } else {
-                    // Single tab: no tab bar, full viewport
-                    let tab = tab_manager.active_tab();
-                    let term = tab.term.lock();
-                    renderer.draw_grid(&*term, 0.0, 0.0);
-                    drop(term);
+                    0.0
+                };
+
+                // Render all panes in the active tab
+                let viewport_h = h - tab_bar_height;
+                let layouts = tab_manager.active_layouts(w, viewport_h);
+                let tab = tab_manager.active_tab();
+                let active_pane_id = tab.pane_tree.active_pane_id();
+
+                for layout in &layouts {
+                    if let Some(pane) = tab.panes.get(&layout.pane_id) {
+                        let term = pane.term.lock();
+                        renderer.draw_grid(
+                            &*term,
+                            layout.x,
+                            layout.y + tab_bar_height,
+                        );
+                        drop(term);
+                    }
+                }
+
+                // Draw pane dividers (2px lines between panes)
+                if layouts.len() > 1 {
+                    let divider_color = [0.725, 0.745, 0.792, 1.0]; // Latte overlay0
+                    for layout in &layouts {
+                        // Right edge divider
+                        if layout.x + layout.width < w - 1.0 {
+                            renderer.draw_rect(
+                                layout.x + layout.width - 1.0,
+                                layout.y + tab_bar_height,
+                                2.0,
+                                layout.height,
+                                divider_color,
+                            );
+                        }
+                        // Bottom edge divider
+                        if layout.y + layout.height < viewport_h - 1.0 {
+                            renderer.draw_rect(
+                                layout.x,
+                                layout.y + layout.height + tab_bar_height - 1.0,
+                                layout.width,
+                                2.0,
+                                divider_color,
+                            );
+                        }
+                    }
                 }
 
                 renderer.flush(w, h);
@@ -280,10 +316,10 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             }
                             return;
                         }
-                        // Cmd+W: Close tab
+                        // Cmd+W: Close active pane (or tab if last pane)
                         Key::Character(ref s) if s == "w" => {
                             if let Some(tab_manager) = &mut self.tab_manager {
-                                if tab_manager.close_active() {
+                                if tab_manager.close_active_pane() {
                                     event_loop.exit();
                                     return;
                                 }
@@ -329,15 +365,80 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             }
                             return;
                         }
+                        // Cmd+D: Split pane vertically
+                        Key::Character(ref s) if s == "d" && !shift_pressed => {
+                            let (cols, rows) = self.grid_size();
+                            let cw = self.renderer.as_ref().map(|r| r.cell_width()).unwrap_or(8.0);
+                            let ch = self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(18.0);
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                tab_manager.split_active(
+                                    panes::Split::Vertical,
+                                    cols, rows, cw, ch, &self.event_proxy,
+                                );
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+Shift+D: Split pane horizontally
+                        Key::Character(ref s) if s == "D" && shift_pressed => {
+                            let (cols, rows) = self.grid_size();
+                            let cw = self.renderer.as_ref().map(|r| r.cell_width()).unwrap_or(8.0);
+                            let ch = self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(18.0);
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                tab_manager.split_active(
+                                    panes::Split::Horizontal,
+                                    cols, rows, cw, ch, &self.event_proxy,
+                                );
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+Shift+Enter: Toggle zoom on active pane
+                        Key::Named(NamedKey::Enter) if shift_pressed => {
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                tab_manager.toggle_zoom();
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+]: Focus next pane
+                        Key::Character(ref s) if s == "]" && !shift_pressed => {
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                tab_manager.focus_next_pane();
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+[: Focus previous pane
+                        Key::Character(ref s) if s == "[" && !shift_pressed => {
+                            if let Some(tab_manager) = &mut self.tab_manager {
+                                tab_manager.focus_prev_pane();
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                            }
+                            return;
+                        }
                         _ => {}
                     }
                 }
 
-                // Forward to active tab's PTY
+                // Forward to active pane's PTY
                 let Some(tab_manager) = &self.tab_manager else {
                     return;
                 };
-                let notifier = &tab_manager.active_tab().notifier;
+                let Some(pane) = tab_manager.active_pane() else {
+                    return;
+                };
+                let notifier = &pane.notifier;
 
                 let bytes: Option<Cow<'static, [u8]>> = match event.logical_key {
                     Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
