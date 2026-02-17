@@ -25,6 +25,10 @@ use event::{EventProxy, KoiEvent};
 use renderer::Renderer;
 use tabs::TabManager;
 
+fn clipboard_paste() -> Option<String> {
+    arboard::Clipboard::new().ok()?.get_text().ok()
+}
+
 struct Koi {
     window: Option<Window>,
     gl_context: Option<glutin::context::PossiblyCurrentContext>,
@@ -427,7 +431,36 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             }
                             return;
                         }
-                        _ => {}
+                        // Cmd+V: Paste from clipboard
+                        Key::Character(ref s) if s == "v" => {
+                            if let Some(text) = clipboard_paste() {
+                                if let Some(tab_manager) = &self.tab_manager {
+                                    if let Some(pane) = tab_manager.active_pane() {
+                                        // Bracket paste mode: wrap in \x1b[200~ ... \x1b[201~
+                                        let mut bytes = Vec::new();
+                                        bytes.extend_from_slice(b"\x1b[200~");
+                                        bytes.extend_from_slice(text.as_bytes());
+                                        bytes.extend_from_slice(b"\x1b[201~");
+                                        pane.notifier.send_input(&bytes);
+                                    }
+                                }
+                            }
+                            return;
+                        }
+                        // Cmd+K: Clear screen
+                        Key::Character(ref s) if s == "k" => {
+                            if let Some(tab_manager) = &self.tab_manager {
+                                if let Some(pane) = tab_manager.active_pane() {
+                                    // Send clear screen + move cursor home
+                                    pane.notifier.send_input(b"\x1b[2J\x1b[H");
+                                }
+                            }
+                            return;
+                        }
+                        _ => {
+                            // Don't forward other Cmd+key combos to PTY
+                            return;
+                        }
                     }
                 }
 
@@ -439,6 +472,9 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     return;
                 };
                 let notifier = &pane.notifier;
+
+                let ctrl_pressed = self.modifiers.control_key();
+                let alt_pressed = self.modifiers.alt_key();
 
                 let bytes: Option<Cow<'static, [u8]>> = match event.logical_key {
                     Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
@@ -454,8 +490,31 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     Key::Named(NamedKey::Delete) => Some(Cow::Borrowed(b"\x1b[3~")),
                     Key::Named(NamedKey::PageUp) => Some(Cow::Borrowed(b"\x1b[5~")),
                     Key::Named(NamedKey::PageDown) => Some(Cow::Borrowed(b"\x1b[6~")),
+                    Key::Named(NamedKey::Space) => {
+                        if ctrl_pressed {
+                            Some(Cow::Borrowed(b"\x00")) // Ctrl+Space = NUL
+                        } else {
+                            Some(Cow::Borrowed(b" "))
+                        }
+                    }
                     Key::Character(ref s) => {
-                        Some(Cow::Owned(s.as_bytes().to_vec()))
+                        if ctrl_pressed && s.len() == 1 {
+                            // Ctrl+key sends control characters (Ctrl+C = 0x03, etc.)
+                            let c = s.chars().next().unwrap();
+                            if c.is_ascii_lowercase() || (c >= '@' && c <= '_') {
+                                let ctrl_byte = (c.to_ascii_uppercase() as u8) & 0x1f;
+                                Some(Cow::Owned(vec![ctrl_byte]))
+                            } else {
+                                Some(Cow::Owned(s.as_bytes().to_vec()))
+                            }
+                        } else if alt_pressed {
+                            // Option-as-Alt: send ESC prefix
+                            let mut bytes = vec![0x1b];
+                            bytes.extend_from_slice(s.as_bytes());
+                            Some(Cow::Owned(bytes))
+                        } else {
+                            Some(Cow::Owned(s.as_bytes().to_vec()))
+                        }
                     }
                     _ => None,
                 };
