@@ -4,7 +4,6 @@ use crate::gl::types::*;
 /// A glyph stored in the atlas.
 #[derive(Clone, Copy, Debug)]
 pub struct Glyph {
-    pub tex_id: GLuint,
     pub uv_x: f32,
     pub uv_y: f32,
     pub uv_w: f32,
@@ -74,7 +73,7 @@ impl Atlas {
     ) -> Option<Glyph> {
         if glyph_width == 0 || glyph_height == 0 {
             return Some(Glyph {
-                tex_id: self.tex_id,
+
                 uv_x: 0.0,
                 uv_y: 0.0,
                 uv_w: 0.0,
@@ -127,7 +126,6 @@ impl Atlas {
         let h = self.height as f32;
 
         Some(Glyph {
-            tex_id: self.tex_id,
             uv_x: x as f32 / w,
             uv_y: y as f32 / h,
             uv_w: glyph_width as f32 / w,

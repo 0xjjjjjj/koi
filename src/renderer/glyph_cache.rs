@@ -77,7 +77,7 @@ impl GlyphCache {
             Err(e) => {
                 log::warn!("Failed to rasterize '{}': {}", c, e);
                 return Glyph {
-                    tex_id: 0,
+
                     width: 0.0,
                     height: 0.0,
                     left: 0.0,
@@ -116,7 +116,7 @@ impl GlyphCache {
                 // Atlas full — return invisible glyph
                 log::warn!("Glyph atlas full, cannot render '{}'", c);
                 return Glyph {
-                    tex_id: 0,
+
                     width: 0.0,
                     height: 0.0,
                     left: 0.0,

@@ -162,10 +162,6 @@ impl TabManager {
         &self.tabs[self.active]
     }
 
-    pub fn active_tab_mut(&mut self) -> &mut Tab {
-        &mut self.tabs[self.active]
-    }
-
     pub fn set_active_tab_title(&mut self, title: String) {
         self.tabs[self.active].title = title;
     }

@@ -35,42 +35,6 @@ fn clipboard_copy(text: &str) {
     }
 }
 
-/// Try to get an image from the clipboard and encode it as OSC 1337 bytes.
-/// Returns None if clipboard has no image.
-fn clipboard_image_as_osc1337() -> Option<Vec<u8>> {
-    let mut cb = arboard::Clipboard::new().ok()?;
-    let img = cb.get_image().ok()?;
-
-    // Encode RGBA pixels to PNG
-    let mut png_buf = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut png_buf, img.width as u32, img.height as u32);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        let mut writer = encoder.write_header().ok()?;
-        writer.write_image_data(&img.bytes).ok()?;
-    }
-
-    // Base64-encode the PNG
-    use base64::Engine;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_buf);
-
-    // Build OSC 1337 File sequence
-    // Format: ESC ] 1337 ; File=name=<b64name>;size=<size>;inline=0 : <b64data> BEL
-    let name_b64 = base64::engine::general_purpose::STANDARD.encode("clipboard.png");
-    let header = format!(
-        "\x1b]1337;File=name={};size={};inline=0:",
-        name_b64,
-        png_buf.len()
-    );
-
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(header.as_bytes());
-    bytes.extend_from_slice(b64.as_bytes());
-    bytes.push(0x07); // BEL terminator
-    Some(bytes)
-}
-
 struct Koi {
     window: Option<Window>,
     gl_context: Option<glutin::context::PossiblyCurrentContext>,
@@ -83,6 +47,7 @@ struct Koi {
     cursor_blink: std::time::Instant,
     mouse_left_pressed: bool,
     needs_redraw: bool,
+    font_size: f32,
 }
 
 impl Koi {
@@ -99,7 +64,24 @@ impl Koi {
             cursor_blink: std::time::Instant::now(),
             mouse_left_pressed: false,
             needs_redraw: true,
+            font_size: 14.0,
         }
+    }
+
+    fn rebuild_renderer(&mut self) {
+        self.renderer = Some(Renderer::new("IBM Plex Mono", self.font_size));
+        if let (Some(renderer), Some(window), Some(tab_manager)) =
+            (&self.renderer, &self.window, &self.tab_manager)
+        {
+            let cw = renderer.cell_width();
+            let ch = renderer.cell_height();
+            let size = window.inner_size();
+            let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
+            let vp_h = size.height as f32 - tab_bar_h;
+            tab_manager.resize_all(size.width as f32, vp_h, cw, ch);
+            window.request_redraw();
+        }
+        self.needs_redraw = true;
     }
 
     fn grid_size(&self) -> (usize, usize) {
@@ -247,11 +229,6 @@ impl ApplicationHandler<KoiEvent> for Koi {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        // Mark dirty so RedrawRequested actually renders
-        if !matches!(event, WindowEvent::RedrawRequested) {
-            self.needs_redraw = true;
-        }
-
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -261,6 +238,10 @@ impl ApplicationHandler<KoiEvent> for Koi {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
+                // Only mark dirty if mouse button is pressed (dragging)
+                if self.mouse_left_pressed {
+                    self.needs_redraw = true;
+                }
 
                 if let (Some(tab_manager), Some(renderer), Some(window)) =
                     (&self.tab_manager, &self.renderer, &self.window)
@@ -337,6 +318,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 ..
             } => {
                 self.mouse_left_pressed = true;
+                self.needs_redraw = true;
                 // Click to focus pane + start selection
                 if let (Some(tab_manager), Some(renderer), Some(window)) =
                     (&mut self.tab_manager, &self.renderer, &self.window)
@@ -445,6 +427,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
             }
             WindowEvent::Resized(new_size) => {
+                self.needs_redraw = true;
                 if let (Some(renderer), Some(tab_manager)) =
                     (&self.renderer, &self.tab_manager)
                 {
@@ -580,6 +563,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 if event.state != ElementState::Pressed {
                     return;
                 }
+                self.needs_redraw = true;
 
                 // Reset cursor blink so it's visible while typing
                 self.cursor_blink = std::time::Instant::now();
@@ -834,11 +818,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                         Key::Character(ref s) if s == "v" => {
                             if let Some(tab_manager) = &self.tab_manager {
                                 if let Some(pane) = tab_manager.active_pane() {
-                                    // Try image paste first (OSC 1337)
-                                    if let Some(osc_bytes) = clipboard_image_as_osc1337() {
-                                        pane.notifier.send_input(&osc_bytes);
-                                    } else if let Some(text) = clipboard_paste() {
-                                        // Text paste with bracket mode
+                                    if let Some(text) = clipboard_paste() {
                                         let sanitized = text.replace("\x1b[201~", "");
                                         let mut bytes = Vec::new();
                                         bytes.extend_from_slice(b"\x1b[200~");
@@ -848,6 +828,29 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                     }
                                 }
                             }
+                            return;
+                        }
+                        // Cmd+Q: Quit
+                        Key::Character(ref s) if s == "q" => {
+                            event_loop.exit();
+                            return;
+                        }
+                        // Cmd+=: Zoom in
+                        Key::Character(ref s) if s == "=" || s == "+" => {
+                            self.font_size = (self.font_size + 1.0).min(32.0);
+                            self.rebuild_renderer();
+                            return;
+                        }
+                        // Cmd+-: Zoom out
+                        Key::Character(ref s) if s == "-" => {
+                            self.font_size = (self.font_size - 1.0).max(8.0);
+                            self.rebuild_renderer();
+                            return;
+                        }
+                        // Cmd+0: Reset zoom
+                        Key::Character(ref s) if s == "0" => {
+                            self.font_size = 14.0;
+                            self.rebuild_renderer();
                             return;
                         }
                         // Cmd+K: Clear screen
@@ -876,20 +879,50 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 };
                 let notifier = &pane.notifier;
 
+                // Check DECCKM (application cursor keys) mode
+                let app_cursor = {
+                    use alacritty_terminal::term::TermMode;
+                    pane.term.lock().mode().contains(TermMode::APP_CURSOR)
+                };
+
                 let bytes: Option<Cow<'static, [u8]>> = match event.logical_key {
                     Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
                     Key::Named(NamedKey::Backspace) => Some(Cow::Borrowed(b"\x7f")),
                     Key::Named(NamedKey::Tab) => Some(Cow::Borrowed(b"\t")),
                     Key::Named(NamedKey::Escape) => Some(Cow::Borrowed(b"\x1b")),
-                    Key::Named(NamedKey::ArrowUp) => Some(Cow::Borrowed(b"\x1b[A")),
-                    Key::Named(NamedKey::ArrowDown) => Some(Cow::Borrowed(b"\x1b[B")),
-                    Key::Named(NamedKey::ArrowRight) => Some(Cow::Borrowed(b"\x1b[C")),
-                    Key::Named(NamedKey::ArrowLeft) => Some(Cow::Borrowed(b"\x1b[D")),
-                    Key::Named(NamedKey::Home) => Some(Cow::Borrowed(b"\x1b[H")),
-                    Key::Named(NamedKey::End) => Some(Cow::Borrowed(b"\x1b[F")),
+                    Key::Named(NamedKey::ArrowUp) => Some(Cow::Borrowed(
+                        if app_cursor { b"\x1bOA" } else { b"\x1b[A" }
+                    )),
+                    Key::Named(NamedKey::ArrowDown) => Some(Cow::Borrowed(
+                        if app_cursor { b"\x1bOB" } else { b"\x1b[B" }
+                    )),
+                    Key::Named(NamedKey::ArrowRight) => Some(Cow::Borrowed(
+                        if app_cursor { b"\x1bOC" } else { b"\x1b[C" }
+                    )),
+                    Key::Named(NamedKey::ArrowLeft) => Some(Cow::Borrowed(
+                        if app_cursor { b"\x1bOD" } else { b"\x1b[D" }
+                    )),
+                    Key::Named(NamedKey::Home) => Some(Cow::Borrowed(
+                        if app_cursor { b"\x1bOH" } else { b"\x1b[H" }
+                    )),
+                    Key::Named(NamedKey::End) => Some(Cow::Borrowed(
+                        if app_cursor { b"\x1bOF" } else { b"\x1b[F" }
+                    )),
                     Key::Named(NamedKey::Delete) => Some(Cow::Borrowed(b"\x1b[3~")),
                     Key::Named(NamedKey::PageUp) => Some(Cow::Borrowed(b"\x1b[5~")),
                     Key::Named(NamedKey::PageDown) => Some(Cow::Borrowed(b"\x1b[6~")),
+                    Key::Named(NamedKey::F1) => Some(Cow::Borrowed(b"\x1bOP")),
+                    Key::Named(NamedKey::F2) => Some(Cow::Borrowed(b"\x1bOQ")),
+                    Key::Named(NamedKey::F3) => Some(Cow::Borrowed(b"\x1bOR")),
+                    Key::Named(NamedKey::F4) => Some(Cow::Borrowed(b"\x1bOS")),
+                    Key::Named(NamedKey::F5) => Some(Cow::Borrowed(b"\x1b[15~")),
+                    Key::Named(NamedKey::F6) => Some(Cow::Borrowed(b"\x1b[17~")),
+                    Key::Named(NamedKey::F7) => Some(Cow::Borrowed(b"\x1b[18~")),
+                    Key::Named(NamedKey::F8) => Some(Cow::Borrowed(b"\x1b[19~")),
+                    Key::Named(NamedKey::F9) => Some(Cow::Borrowed(b"\x1b[20~")),
+                    Key::Named(NamedKey::F10) => Some(Cow::Borrowed(b"\x1b[21~")),
+                    Key::Named(NamedKey::F11) => Some(Cow::Borrowed(b"\x1b[23~")),
+                    Key::Named(NamedKey::F12) => Some(Cow::Borrowed(b"\x1b[24~")),
                     Key::Named(NamedKey::Space) => {
                         if ctrl_pressed {
                             Some(Cow::Borrowed(b"\x00")) // Ctrl+Space = NUL
@@ -924,6 +957,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                self.needs_redraw = true;
                 let scroll_lines = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y as i32,
                     winit::event::MouseScrollDelta::PixelDelta(pos) => {
@@ -992,14 +1026,15 @@ impl ApplicationHandler<KoiEvent> for Koi {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: KoiEvent) {
-        self.needs_redraw = true;
         match event {
             KoiEvent::Wakeup => {
+                self.needs_redraw = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
             KoiEvent::Title(title) => {
+                self.needs_redraw = true;
                 if let Some(w) = &self.window {
                     w.set_title(&title);
                 }
@@ -1008,6 +1043,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
             }
             KoiEvent::ChildExit(pane_id, code) => {
+                self.needs_redraw = true;
                 log::info!("Pane {} exited with code {}", pane_id, code);
                 if let Some(tab_manager) = &mut self.tab_manager {
                     if tab_manager.close_pane_by_id(pane_id) {

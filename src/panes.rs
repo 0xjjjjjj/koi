@@ -188,10 +188,6 @@ impl PaneTree {
         self.active = pane_id;
     }
 
-    pub fn is_zoomed(&self) -> bool {
-        self.zoomed
-    }
-
     pub fn toggle_zoom(&mut self) {
         self.zoomed = !self.zoomed;
     }
