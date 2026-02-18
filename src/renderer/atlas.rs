@@ -137,3 +137,11 @@ impl Atlas {
         })
     }
 }
+
+impl Drop for Atlas {
+    fn drop(&mut self) {
+        unsafe {
+            gl::DeleteTextures(1, &self.tex_id);
+        }
+    }
+}

@@ -342,25 +342,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
                             let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
 
-                            // Mouse reporting: send SGR press if app wants mouse events
-                            if let Some(pane) = tab_manager.active_pane() {
-                                use alacritty_terminal::term::TermMode;
-                                let term = pane.term.lock();
-                                let mode = term.mode();
-                                let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
-                                let sgr = mode.contains(TermMode::SGR_MOUSE);
-                                drop(term);
-                                if mouse_mode && sgr {
-                                    let seq = format!("\x1b[<0;{};{}M", col, line);
-                                    pane.notifier.send_input(seq.as_bytes());
-                                    if let Some(w) = &self.window {
-                                        w.request_redraw();
-                                    }
-                                    break;
-                                }
-                            }
-
-                            // Start selection (normal mode)
+                            // Check mouse mode and either send SGR or start selection (single lock)
                             let grid_col = col.saturating_sub(1);
                             let grid_line = (line as i32).saturating_sub(1);
                             let point = alacritty_terminal::index::Point::new(
@@ -373,12 +355,22 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                 alacritty_terminal::index::Side::Left
                             };
                             if let Some(pane) = tab_manager.active_pane() {
+                                use alacritty_terminal::term::TermMode;
                                 let mut term = pane.term.lock();
-                                term.selection = Some(alacritty_terminal::selection::Selection::new(
-                                    alacritty_terminal::selection::SelectionType::Simple,
-                                    point,
-                                    side,
-                                ));
+                                let mode = term.mode();
+                                let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
+                                let sgr = mode.contains(TermMode::SGR_MOUSE);
+                                if mouse_mode && sgr {
+                                    drop(term);
+                                    let seq = format!("\x1b[<0;{};{}M", col, line);
+                                    pane.notifier.send_input(seq.as_bytes());
+                                } else {
+                                    term.selection = Some(alacritty_terminal::selection::Selection::new(
+                                        alacritty_terminal::selection::SelectionType::Simple,
+                                        point,
+                                        side,
+                                    ));
+                                }
                             }
                             if let Some(w) = &self.window {
                                 w.request_redraw();

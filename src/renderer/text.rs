@@ -209,3 +209,14 @@ impl TextRenderer {
         self.batch.clear();
     }
 }
+
+impl Drop for TextRenderer {
+    fn drop(&mut self) {
+        unsafe {
+            gl::DeleteProgram(self.program);
+            gl::DeleteBuffers(1, &self.instance_vbo);
+            gl::DeleteBuffers(1, &self.quad_vbo);
+            gl::DeleteVertexArrays(1, &self.vao);
+        }
+    }
+}
