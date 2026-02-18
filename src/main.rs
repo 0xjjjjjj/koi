@@ -194,6 +194,12 @@ impl ApplicationHandler<KoiEvent> for Koi {
             log::info!("GPU renderer: {}", renderer_str);
         }
 
+        // Disable IME — we handle all key input directly.
+        window.set_ime_allowed(false);
+
+        // Setup terminal environment (TERM, COLORTERM).
+        alacritty_terminal::tty::setup_env();
+
         // Create renderer after GL is initialized
         let renderer = Renderer::new("IBM Plex Mono", 14.0);
         let cw = renderer.cell_width();
@@ -922,26 +928,39 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             Some(Cow::Borrowed(b" "))
                         }
                     }
-                    Key::Character(ref s) => {
-                        if ctrl_pressed && s.len() == 1 {
-                            // Ctrl+key sends control characters (Ctrl+C = 0x03, etc.)
-                            let c = s.chars().next().unwrap();
-                            if c.is_ascii_lowercase() || (c >= '@' && c <= '_') {
-                                let ctrl_byte = (c.to_ascii_uppercase() as u8) & 0x1f;
-                                Some(Cow::Owned(vec![ctrl_byte]))
+                    _ => {
+                        // For text input, use event.text (canonical winit 0.30 path).
+                        // Ctrl+key: compute control byte from logical_key.
+                        if ctrl_pressed {
+                            if let Key::Character(ref s) = event.logical_key {
+                                if s.len() == 1 {
+                                    let c = s.chars().next().unwrap();
+                                    if c.is_ascii_lowercase() || (c >= '@' && c <= '_') {
+                                        let ctrl_byte = (c.to_ascii_uppercase() as u8) & 0x1f;
+                                        Some(Cow::Owned(vec![ctrl_byte]))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
                             } else {
-                                Some(Cow::Owned(s.as_bytes().to_vec()))
+                                None
                             }
                         } else if alt_pressed {
-                            // Option-as-Alt: send ESC prefix
-                            let mut bytes = vec![0x1b];
-                            bytes.extend_from_slice(s.as_bytes());
-                            Some(Cow::Owned(bytes))
+                            // Option-as-Alt: send ESC prefix + text
+                            event.text.as_ref().map(|t| {
+                                let mut bytes = vec![0x1b];
+                                bytes.extend_from_slice(t.as_bytes());
+                                Cow::Owned(bytes)
+                            })
                         } else {
-                            Some(Cow::Owned(s.as_bytes().to_vec()))
+                            // Normal text: use event.text directly
+                            event.text.as_ref().map(|t| {
+                                Cow::Owned(t.as_bytes().to_vec())
+                            })
                         }
                     }
-                    _ => None,
                 };
 
                 if let Some(bytes) = bytes {
