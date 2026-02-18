@@ -12,6 +12,8 @@
     <string>0.1.0</string>
     <key>CFBundleExecutable</key>
     <string>koi</string>
+    <key>CFBundleIconFile</key>
+    <string>koi</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>NSHighResolutionCapable</key>
