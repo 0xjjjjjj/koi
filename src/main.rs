@@ -1145,6 +1145,18 @@ impl ApplicationHandler<KoiEvent> for Koi {
             }
         }
     }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Schedule periodic redraws so the cursor blink animates when idle.
+        if self.window.is_some() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(500),
+            ));
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
 }
 
 fn main() {
