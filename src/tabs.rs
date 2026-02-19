@@ -208,6 +208,7 @@ impl TabManager {
     }
 
     /// Split the active pane in the active tab, then resize all panes to fit.
+    #[allow(clippy::too_many_arguments)]
     pub fn split_active(
         &mut self,
         split: Split,

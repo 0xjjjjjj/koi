@@ -29,3 +29,22 @@ impl Dimensions for TerminalSize {
         self.columns
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::grid::Dimensions;
+
+    #[test]
+    fn new_sets_dimensions() {
+        let size = TerminalSize::new(80, 24);
+        assert_eq!(size.columns(), 80);
+        assert_eq!(size.screen_lines(), 24);
+    }
+
+    #[test]
+    fn total_lines_includes_history() {
+        let size = TerminalSize::new(80, 24);
+        assert_eq!(size.total_lines(), 24 + 10_000);
+    }
+}

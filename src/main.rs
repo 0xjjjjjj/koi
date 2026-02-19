@@ -615,7 +615,7 @@ impl KoiState {
                     if let Key::Character(ref s) = event.logical_key {
                         if s.len() == 1 {
                             let c = s.chars().next().unwrap();
-                            if c.is_ascii_lowercase() || (c >= '@' && c <= '_') {
+                            if c.is_ascii_lowercase() || ('@'..='_').contains(&c) {
                                 let ctrl_byte = (c.to_ascii_uppercase() as u8) & 0x1f;
                                 Some(Cow::Owned(vec![ctrl_byte]))
                             } else {
@@ -1050,7 +1050,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     .collect();
                 s.tab_manager.set_tab_title_by_pane(pane_id, title.clone());
                 // Only update window title if the event came from the active tab.
-                if s.tab_manager.active_tab().map_or(false, |t| t.panes.contains_key(&pane_id)) {
+                if s.tab_manager.active_tab().is_some_and(|t| t.panes.contains_key(&pane_id)) {
                     s.window.set_title(&title);
                 }
             }

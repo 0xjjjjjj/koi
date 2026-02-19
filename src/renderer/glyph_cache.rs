@@ -90,7 +90,7 @@ impl GlyphCache {
             atlas: Atlas::new(2048),
             cell_width: (cell_width as f32).ceil(),
             cell_height: (cell_height as f32).ceil(),
-            descent: descent as f32,
+            descent,
         }
     }
 

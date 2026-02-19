@@ -279,3 +279,168 @@ impl PaneTree {
         layouts
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_pane_fills_viewport() {
+        let tree = PaneTree::new(0);
+        let layouts = tree.calculate_layouts(800.0, 600.0);
+        assert_eq!(layouts.len(), 1);
+        let l = &layouts[0];
+        assert_eq!(l.pane_id, 0);
+        assert!((l.x - 0.0).abs() < 0.01);
+        assert!((l.y - 0.0).abs() < 0.01);
+        assert!((l.width - 800.0).abs() < 0.01);
+        assert!((l.height - 600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn vertical_split_divides_width() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        let layouts = tree.calculate_layouts(800.0, 600.0);
+        assert_eq!(layouts.len(), 2);
+        let total_width: f32 = layouts.iter().map(|l| l.width).sum();
+        assert!((total_width - 800.0).abs() < 0.01);
+        // Both panes should have full height
+        for l in &layouts {
+            assert!((l.height - 600.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn horizontal_split_divides_height() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Horizontal, 1);
+        let layouts = tree.calculate_layouts(800.0, 600.0);
+        assert_eq!(layouts.len(), 2);
+        let total_height: f32 = layouts.iter().map(|l| l.height).sum();
+        assert!((total_height - 600.0).abs() < 0.01);
+        // Both panes should have full width
+        for l in &layouts {
+            assert!((l.width - 800.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn nested_splits_produce_correct_count() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        tree.split_active(Split::Horizontal, 2);
+        tree.split_active(Split::Vertical, 3);
+        let layouts = tree.calculate_layouts(800.0, 600.0);
+        assert_eq!(layouts.len(), 4);
+    }
+
+    #[test]
+    fn close_last_pane_returns_true() {
+        let mut tree = PaneTree::new(0);
+        assert!(tree.close_active());
+    }
+
+    #[test]
+    fn close_non_last_returns_false() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        assert!(!tree.close_active());
+        let layouts = tree.calculate_layouts(800.0, 600.0);
+        assert_eq!(layouts.len(), 1);
+    }
+
+    #[test]
+    fn focus_next_cycles() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        tree.split_active(Split::Vertical, 2);
+        // Active is now 2 (the last split). Pane order: [0, 1, 2]
+        let ids = tree.pane_ids();
+        assert_eq!(ids.len(), 3);
+
+        // Navigate to the last pane in order
+        tree.set_active(*ids.last().unwrap());
+        let last_id = tree.active_pane_id();
+
+        // focus_next from last should wrap to first
+        tree.focus_next();
+        assert_eq!(tree.active_pane_id(), ids[0]);
+
+        // Verify it wrapped (new active differs from last)
+        assert_ne!(tree.active_pane_id(), last_id);
+    }
+
+    #[test]
+    fn focus_prev_cycles() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        tree.split_active(Split::Vertical, 2);
+        let ids = tree.pane_ids();
+        assert_eq!(ids.len(), 3);
+
+        // Set active to the first pane
+        tree.set_active(ids[0]);
+        assert_eq!(tree.active_pane_id(), ids[0]);
+
+        // focus_prev from first should wrap to last
+        tree.focus_prev();
+        assert_eq!(tree.active_pane_id(), *ids.last().unwrap());
+    }
+
+    #[test]
+    fn zoom_shows_only_active_pane() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        tree.split_active(Split::Horizontal, 2);
+        // 3 panes exist, active is 2
+        assert_eq!(tree.pane_count(), 3);
+
+        tree.toggle_zoom();
+        let layouts = tree.calculate_layouts(800.0, 600.0);
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].pane_id, tree.active_pane_id());
+        assert!((layouts[0].width - 800.0).abs() < 0.01);
+        assert!((layouts[0].height - 600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn split_changes_active_to_new_pane() {
+        let mut tree = PaneTree::new(0);
+        assert_eq!(tree.active_pane_id(), 0);
+        tree.split_active(Split::Vertical, 42);
+        assert_eq!(tree.active_pane_id(), 42);
+    }
+
+    #[test]
+    fn layouts_tile_without_gaps() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        tree.split_active(Split::Horizontal, 2);
+        tree.set_active(0);
+        tree.split_active(Split::Horizontal, 3);
+
+        let vw = 1024.0_f32;
+        let vh = 768.0_f32;
+        let layouts = tree.calculate_layouts(vw, vh);
+
+        // Sum of all (width * height) should equal viewport area.
+        // Because splits are axis-aligned and non-overlapping, this holds
+        // only if there are no gaps or overlaps.
+        let total_area: f32 = layouts.iter().map(|l| l.width * l.height).sum();
+        assert!(
+            (total_area - vw * vh).abs() < 1.0,
+            "total_area={total_area}, expected={}",
+            vw * vh
+        );
+    }
+
+    #[test]
+    fn zero_viewport_produces_zero_dimensions() {
+        let tree = PaneTree::new(0);
+        let layouts = tree.calculate_layouts(0.0, 0.0);
+        assert_eq!(layouts.len(), 1);
+        assert!((layouts[0].width).abs() < 0.01);
+        assert!((layouts[0].height).abs() < 0.01);
+    }
+}
