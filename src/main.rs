@@ -258,10 +258,12 @@ impl ApplicationHandler<KoiEvent> for Koi {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x, position.y);
-                // Only mark dirty if mouse button is pressed (dragging)
-                if self.mouse_left_pressed {
-                    self.needs_redraw = true;
+
+                // Skip expensive layout/lock work when not dragging.
+                if !self.mouse_left_pressed {
+                    return;
                 }
+                self.needs_redraw = true;
 
                 if let (Some(tab_manager), Some(renderer), Some(window)) =
                     (&self.tab_manager, &self.renderer, &self.window)
@@ -281,56 +283,44 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
                         let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
                         let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
+                        let grid_col = col.saturating_sub(1);
+                        let grid_line = (line as i32).saturating_sub(1);
+                        let point = alacritty_terminal::index::Point::new(
+                            alacritty_terminal::index::Line(grid_line),
+                            alacritty_terminal::index::Column(grid_col),
+                        );
+                        let side = if ((cx - layout.x) % cw) > cw / 2.0 {
+                            alacritty_terminal::index::Side::Right
+                        } else {
+                            alacritty_terminal::index::Side::Left
+                        };
 
-                        // Check if app wants mouse events
+                        // Single lock: check mode + update selection in one scope.
                         if let Some(pane) = tab_manager.active_pane() {
                             use alacritty_terminal::term::TermMode;
-                            let term = pane.term.lock();
+                            let mut term = pane.term.lock();
                             let mode = term.mode();
                             let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
                             let sgr = mode.contains(TermMode::SGR_MOUSE);
                             let motion = mode.contains(TermMode::MOUSE_MOTION)
                                 || mode.contains(TermMode::MOUSE_DRAG);
-                            drop(term);
 
-                            if mouse_mode && self.mouse_left_pressed && (motion) {
-                                // SGR mouse drag: button 32 = motion + left
-                                if sgr {
-                                    let seq = format!("\x1b[<32;{};{}M", col, line);
-                                    pane.notifier.send_input(seq.as_bytes());
-                                }
-                                if let Some(w) = &self.window {
-                                    w.request_redraw();
-                                }
-                                return;
-                            }
-                        }
-
-                        // Normal selection drag
-                        if self.mouse_left_pressed {
-                            if let Some(pane) = tab_manager.active_pane() {
-                                let grid_col = col.saturating_sub(1);
-                                let grid_line = (line as i32).saturating_sub(1);
-                                let point = alacritty_terminal::index::Point::new(
-                                    alacritty_terminal::index::Line(grid_line),
-                                    alacritty_terminal::index::Column(grid_col),
+                            if mouse_mode && motion && sgr {
+                                drop(term);
+                                pane.notifier.send_bytes(
+                                    format!("\x1b[<32;{};{}M", col, line).into_bytes(),
                                 );
-                                let side = if ((cx - layout.x) % cw) > cw / 2.0 {
-                                    alacritty_terminal::index::Side::Right
-                                } else {
-                                    alacritty_terminal::index::Side::Left
-                                };
-                                let mut term = pane.term.lock();
+                            } else {
+                                // Normal selection drag — update in same lock.
                                 if let Some(ref mut sel) = term.selection {
                                     sel.update(point, side);
-                                }
-                                drop(term);
-                                if let Some(w) = &self.window {
-                                    w.request_redraw();
                                 }
                             }
                         }
                     }
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
                     }
                 }
             }
@@ -384,8 +374,9 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                 let sgr = mode.contains(TermMode::SGR_MOUSE);
                                 if mouse_mode && sgr {
                                     drop(term);
-                                    let seq = format!("\x1b[<0;{};{}M", col, line);
-                                    pane.notifier.send_input(seq.as_bytes());
+                                    pane.notifier.send_bytes(
+                                        format!("\x1b[<0;{};{}M", col, line).into_bytes(),
+                                    );
                                 } else {
                                     term.selection = Some(alacritty_terminal::selection::Selection::new(
                                         alacritty_terminal::selection::SelectionType::Simple,
@@ -434,8 +425,9 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                 if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
                                     let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
                                     let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
-                                    let seq = format!("\x1b[<0;{};{}m", col, line);
-                                    pane.notifier.send_input(seq.as_bytes());
+                                    pane.notifier.send_bytes(
+                                        format!("\x1b[<0;{};{}m", col, line).into_bytes(),
+                                    );
                                 }
                             }
                         }
@@ -1115,9 +1107,10 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                             let button = if scroll_lines > 0 { 64 } else { 65 };
                                             let count = scroll_lines.unsigned_abs();
                                             for _ in 0..count {
-                                                let seq =
-                                                    format!("\x1b[<{};{};{}M", button, col, line);
-                                                pane.notifier.send_input(seq.as_bytes());
+                                                pane.notifier.send_bytes(
+                                                    format!("\x1b[<{};{};{}M", button, col, line)
+                                                        .into_bytes(),
+                                                );
                                             }
                                         }
                                     }

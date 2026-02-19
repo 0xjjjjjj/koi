@@ -69,6 +69,11 @@ impl Notifier {
         let _ = self.0.send(Msg::Input(Cow::Owned(data.to_vec())));
     }
 
+    /// Send owned bytes without copying — use with format!().into_bytes().
+    pub fn send_bytes(&self, data: Vec<u8>) {
+        let _ = self.0.send(Msg::Input(Cow::Owned(data)));
+    }
+
     pub fn send_resize(&self, size: WindowSize) {
         let _ = self.0.send(Msg::Resize(size));
     }
