@@ -169,13 +169,16 @@ impl Renderer {
         let descent = self.glyph_cache.descent;
 
         let content = term.renderable_content();
+        // display_offset > 0 means we're scrolled into scrollback history.
+        // display_iter yields Line(-display_offset) as the topmost visible row.
+        // Normalize to 0-based viewport rows by adding display_offset.
+        let display_offset = content.display_offset as i32;
+        let in_scrollback = display_offset > 0;
 
         for indexed in content.display_iter {
             let col = indexed.point.column.0;
             let line = indexed.point.line.0;
-            // Lines are negative-indexed from viewport top in alacritty_terminal.
-            // Line(0) is the first visible line at the top.
-            let row = line as f32;
+            let row = (line + display_offset) as f32;
 
             let cell_x = offset_x + col as f32 * cw;
             let cell_y = offset_y + row * ch;
@@ -266,11 +269,12 @@ impl Renderer {
             }
         }
 
-        // Draw cursor (only if visible — handles blink + active pane)
-        if show_cursor {
+        // Draw cursor — hide when scrolled into history (cursor is below viewport).
+        if show_cursor && !in_scrollback {
             let cursor = content.cursor;
             let cursor_x = offset_x + cursor.point.column.0 as f32 * cw;
-            let cursor_y = offset_y + cursor.point.line.0 as f32 * ch;
+            let cursor_y =
+                offset_y + (cursor.point.line.0 + display_offset) as f32 * ch;
             self.draw_rect(cursor_x, cursor_y, cw, ch, [0.298, 0.310, 0.412, 0.7]);
         }
     }
