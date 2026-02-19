@@ -9,8 +9,8 @@ use winit::event_loop::EventLoopProxy;
 pub enum KoiEvent {
     /// Terminal content changed, needs redraw.
     Wakeup,
-    /// Terminal title changed.
-    Title(String),
+    /// Terminal title changed (title, pane_id).
+    Title(String, usize),
     /// Child process exited (pane_id, exit_code).
     ChildExit(usize, i32),
     /// Terminal bell.
@@ -42,7 +42,7 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: TermEvent) {
         let koi_event = match event {
             TermEvent::Wakeup => KoiEvent::Wakeup,
-            TermEvent::Title(title) => KoiEvent::Title(title),
+            TermEvent::Title(title) => KoiEvent::Title(title, self.pane_id),
             TermEvent::ChildExit(code) => KoiEvent::ChildExit(self.pane_id, code),
             TermEvent::Bell => KoiEvent::Bell,
             // Security: intentionally block these events.

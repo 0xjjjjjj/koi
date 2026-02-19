@@ -162,8 +162,14 @@ impl TabManager {
         &self.tabs[self.active]
     }
 
-    pub fn set_active_tab_title(&mut self, title: String) {
-        self.tabs[self.active].title = title;
+    /// Set the title of the tab containing the given pane.
+    pub fn set_tab_title_by_pane(&mut self, pane_id: usize, title: String) {
+        for tab in &mut self.tabs {
+            if tab.panes.contains_key(&pane_id) {
+                tab.title = title;
+                return;
+            }
+        }
     }
 
     pub fn active_index(&self) -> usize {

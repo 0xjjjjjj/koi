@@ -1148,18 +1148,23 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     w.request_redraw();
                 }
             }
-            KoiEvent::Title(title) => {
+            KoiEvent::Title(title, pane_id) => {
                 self.needs_redraw = true;
                 // Sanitize: strip control chars, limit length.
                 let title: String = title.chars()
                     .filter(|c| !c.is_control())
                     .take(256)
                     .collect();
-                if let Some(w) = &self.window {
-                    w.set_title(&title);
-                }
                 if let Some(tab_manager) = &mut self.tab_manager {
-                    tab_manager.set_active_tab_title(title);
+                    tab_manager.set_tab_title_by_pane(pane_id, title.clone());
+                }
+                // Only update window title if the event came from the active tab.
+                if let Some(tab_manager) = &self.tab_manager {
+                    if tab_manager.active_tab().panes.contains_key(&pane_id) {
+                        if let Some(w) = &self.window {
+                            w.set_title(&title);
+                        }
+                    }
                 }
             }
             KoiEvent::ChildExit(pane_id, code) => {
