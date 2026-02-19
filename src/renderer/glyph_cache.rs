@@ -9,6 +9,9 @@ use super::atlas::{Atlas, Glyph};
 pub struct GlyphCache {
     rasterizer: Rasterizer,
     font_key: FontKey,
+    bold_key: FontKey,
+    italic_key: FontKey,
+    bold_italic_key: FontKey,
     cache: HashMap<GlyphKey, Glyph>,
     atlas: Atlas,
     pub cell_width: f32,
@@ -43,6 +46,27 @@ impl GlyphCache {
                 rasterizer.load_font(&fallback, size).expect("load fallback font")
             });
 
+        let bold_key = rasterizer
+            .load_font(
+                &FontDesc::new(font_family, Style::Description { slant: Slant::Normal, weight: Weight::Bold }),
+                size,
+            )
+            .unwrap_or(font_key);
+
+        let italic_key = rasterizer
+            .load_font(
+                &FontDesc::new(font_family, Style::Description { slant: Slant::Italic, weight: Weight::Normal }),
+                size,
+            )
+            .unwrap_or(font_key);
+
+        let bold_italic_key = rasterizer
+            .load_font(
+                &FontDesc::new(font_family, Style::Description { slant: Slant::Italic, weight: Weight::Bold }),
+                size,
+            )
+            .unwrap_or(font_key);
+
         let metrics = rasterizer.metrics(font_key, size).expect("font metrics");
         let cell_width = metrics.average_advance;
         let cell_height = metrics.line_height;
@@ -59,6 +83,9 @@ impl GlyphCache {
         GlyphCache {
             rasterizer,
             font_key,
+            bold_key,
+            italic_key,
+            bold_italic_key,
             cache: HashMap::new(),
             atlas: Atlas::new(2048),
             cell_width: (cell_width as f32).ceil(),
@@ -71,9 +98,15 @@ impl GlyphCache {
         self.atlas.tex_id()
     }
 
-    pub fn get_glyph(&mut self, c: char) -> Glyph {
+    pub fn get_glyph(&mut self, c: char, bold: bool, italic: bool) -> Glyph {
+        let font_key = match (bold, italic) {
+            (true, true) => self.bold_italic_key,
+            (true, false) => self.bold_key,
+            (false, true) => self.italic_key,
+            (false, false) => self.font_key,
+        };
         let key = GlyphKey {
-            font_key: self.font_key,
+            font_key,
             character: c,
             size: crossfont::Size::new(0.), // size is already set on font
         };

@@ -102,8 +102,8 @@ impl Renderer {
                 continue;
             }
 
-            // Glyph
-            let glyph = self.glyph_cache.get_glyph(c);
+            // Glyph (tab bar: always regular weight)
+            let glyph = self.glyph_cache.get_glyph(c, false, false);
             if glyph.width > 0.0 {
                 let gx = cell_x + glyph.left;
                 let gy = cell_y + ch + descent - glyph.top;
@@ -247,7 +247,11 @@ impl Renderer {
                 fg_color
             };
 
-            let glyph = self.glyph_cache.get_glyph(c);
+            let glyph = self.glyph_cache.get_glyph(
+                c,
+                cell.flags.contains(Flags::BOLD),
+                cell.flags.contains(Flags::ITALIC),
+            );
             if glyph.width > 0.0 {
                 let gx = cell_x + glyph.left;
                 let gy = cell_y + ch + descent - glyph.top;

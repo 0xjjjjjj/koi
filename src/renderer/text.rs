@@ -3,7 +3,7 @@ use crate::gl::types::*;
 
 use super::shader;
 
-const MAX_INSTANCES: usize = 30_000;
+const MAX_INSTANCES: usize = 65_536;
 
 // Per-instance data: position + glyph metrics + UV + color
 #[repr(C)]

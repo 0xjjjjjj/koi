@@ -35,6 +35,15 @@ fn clipboard_copy(text: &str) {
     }
 }
 
+/// Pre-computed mouse-to-grid mapping for event handlers.
+struct MouseHit {
+    col: usize,
+    line: usize,
+    cx: f32,
+    cw: f32,
+    layout_x: f32,
+}
+
 struct Koi {
     window: Option<Window>,
     gl_context: Option<glutin::context::PossiblyCurrentContext>,
@@ -54,6 +63,28 @@ struct Koi {
 }
 
 impl Koi {
+    /// Map current cursor position to terminal grid coordinates.
+    fn mouse_hit(&self) -> Option<MouseHit> {
+        let tab_manager = self.tab_manager.as_ref()?;
+        let renderer = self.renderer.as_ref()?;
+        let window = self.window.as_ref()?;
+        let scale = window.scale_factor() as f32;
+        let cw = renderer.cell_width();
+        let ch = renderer.cell_height();
+        let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
+        let cx = self.cursor_pos.0 as f32 * scale;
+        let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+        let size = window.inner_size();
+        let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
+        let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
+        let active_tab = tab_manager.active_tab()?;
+        let active_id = active_tab.pane_tree.active_pane_id();
+        let layout = layouts.iter().find(|l| l.pane_id == active_id)?;
+        let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
+        let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
+        Some(MouseHit { col, line, cx, cw, layout_x: layout.x })
+    }
+
     fn new(event_proxy: EventProxy) -> Self {
         Self {
             window: None,
@@ -265,31 +296,15 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
                 self.needs_redraw = true;
 
-                if let (Some(tab_manager), Some(renderer), Some(window)) =
-                    (&self.tab_manager, &self.renderer, &self.window)
-                {
-                    let scale = window.scale_factor() as f32;
-                    let cw = renderer.cell_width();
-                    let ch = renderer.cell_height();
-                    let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
-                    let cx = position.x as f32 * scale;
-                    let cy = position.y as f32 * scale - tab_bar_h;
-                    let size = window.inner_size();
-                    let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
-                    let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
-                    if let Some(active_tab) = tab_manager.active_tab() {
-                    let active_id = active_tab.pane_tree.active_pane_id();
-
-                    if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
-                        let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
-                        let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
-                        let grid_col = col.saturating_sub(1);
-                        let grid_line = (line as i32).saturating_sub(1);
+                if let Some(hit) = self.mouse_hit() {
+                    if let Some(tab_manager) = &self.tab_manager {
+                        let grid_col = hit.col.saturating_sub(1);
+                        let grid_line = (hit.line as i32).saturating_sub(1);
                         let point = alacritty_terminal::index::Point::new(
                             alacritty_terminal::index::Line(grid_line),
                             alacritty_terminal::index::Column(grid_col),
                         );
-                        let side = if ((cx - layout.x) % cw) > cw / 2.0 {
+                        let side = if ((hit.cx - hit.layout_x) % hit.cw) > hit.cw / 2.0 {
                             alacritty_terminal::index::Side::Right
                         } else {
                             alacritty_terminal::index::Side::Left
@@ -308,7 +323,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             if mouse_mode && motion && sgr {
                                 drop(term);
                                 pane.notifier.send_bytes(
-                                    format!("\x1b[<32;{};{}M", col, line).into_bytes(),
+                                    format!("\x1b[<32;{};{}M", hit.col, hit.line).into_bytes(),
                                 );
                             } else {
                                 // Normal selection drag — update in same lock.
@@ -317,7 +332,6 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                 }
                             }
                         }
-                    }
                     }
                     if let Some(w) = &self.window {
                         w.request_redraw();
@@ -400,9 +414,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
             } => {
                 self.mouse_left_pressed = false;
                 // Mouse reporting: send SGR release if app wants mouse events
-                if let (Some(tab_manager), Some(renderer), Some(window)) =
-                    (&self.tab_manager, &self.renderer, &self.window)
-                {
+                if let Some(tab_manager) = &self.tab_manager {
                     if let Some(pane) = tab_manager.active_pane() {
                         use alacritty_terminal::term::TermMode;
                         let term = pane.term.lock();
@@ -411,24 +423,10 @@ impl ApplicationHandler<KoiEvent> for Koi {
                         let sgr = mode.contains(TermMode::SGR_MOUSE);
                         drop(term);
                         if mouse_mode && sgr {
-                            let scale = window.scale_factor() as f32;
-                            let cw = renderer.cell_width();
-                            let ch = renderer.cell_height();
-                            let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
-                            let cx = self.cursor_pos.0 as f32 * scale;
-                            let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
-                            let size = window.inner_size();
-                            let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
-                            let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
-                            if let Some(active_tab) = tab_manager.active_tab() {
-                                let active_id = active_tab.pane_tree.active_pane_id();
-                                if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
-                                    let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
-                                    let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
-                                    pane.notifier.send_bytes(
-                                        format!("\x1b[<0;{};{}m", col, line).into_bytes(),
-                                    );
-                                }
+                            if let Some(hit) = self.mouse_hit() {
+                                pane.notifier.send_bytes(
+                                    format!("\x1b[<0;{};{}m", hit.col, hit.line).into_bytes(),
+                                );
                             }
                         }
                     }
@@ -1080,39 +1078,14 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             drop(term);
 
                             if mouse_mode && sgr {
-                                if let (Some(renderer), Some(window)) =
-                                    (&self.renderer, &self.window)
-                                {
-                                    let scale = window.scale_factor() as f32;
-                                    let cw = renderer.cell_width();
-                                    let ch = renderer.cell_height();
-                                    let tab_bar_h =
-                                        if tab_manager.count() > 1 { ch } else { 0.0 };
-                                    let cx = self.cursor_pos.0 as f32 * scale;
-                                    let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
-                                    let size = window.inner_size();
-                                    let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
-                                    let layouts =
-                                        tab_manager.active_layouts(size.width as f32, viewport_h);
-                                    if let Some(active_tab) = tab_manager.active_tab() {
-                                        let active_id = active_tab.pane_tree.active_pane_id();
-                                        if let Some(layout) =
-                                            layouts.iter().find(|l| l.pane_id == active_id)
-                                        {
-                                            let col =
-                                                ((cx - layout.x) / cw).max(0.0) as usize + 1;
-                                            let line =
-                                                ((cy - layout.y) / ch).max(0.0) as usize + 1;
-                                            // button 64 = scroll up, 65 = scroll down
-                                            let button = if scroll_lines > 0 { 64 } else { 65 };
-                                            let count = scroll_lines.unsigned_abs();
-                                            for _ in 0..count {
-                                                pane.notifier.send_bytes(
-                                                    format!("\x1b[<{};{};{}M", button, col, line)
-                                                        .into_bytes(),
-                                                );
-                                            }
-                                        }
+                                if let Some(hit) = self.mouse_hit() {
+                                    let button = if scroll_lines > 0 { 64 } else { 65 };
+                                    let count = scroll_lines.unsigned_abs();
+                                    for _ in 0..count {
+                                        pane.notifier.send_bytes(
+                                            format!("\x1b[<{};{};{}M", button, hit.col, hit.line)
+                                                .into_bytes(),
+                                        );
                                     }
                                 }
                             } else if alt_screen {
