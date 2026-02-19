@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-
 use alacritty_terminal::event::WindowSize;
-use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg};
+use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, State as PtyState};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::tty;
@@ -11,10 +10,23 @@ use crate::event::{EventProxy, Notifier};
 use crate::panes::{PaneLayout, PaneTree, Split};
 use crate::terminal::TerminalSize;
 
+type PtyJoinHandle = std::thread::JoinHandle<(PtyEventLoop<tty::Pty, EventProxy>, PtyState)>;
+
 /// A terminal pane with its own Term + PTY.
 pub struct Pane {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub notifier: Notifier,
+    _pty_thread: Option<PtyJoinHandle>,
+}
+
+impl Drop for Pane {
+    fn drop(&mut self) {
+        // Send shutdown, then join the PTY thread to release the Term mutex.
+        let _ = self.notifier.0.send(Msg::Shutdown);
+        if let Some(handle) = self._pty_thread.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 /// A tab containing a tree of panes.
@@ -86,9 +98,9 @@ impl TabManager {
         .expect("create PTY event loop");
 
         let notifier = Notifier(pty_event_loop.channel());
-        let _pty_thread = pty_event_loop.spawn();
+        let pty_thread = pty_event_loop.spawn();
 
-        (id, Pane { term, notifier })
+        (id, Pane { term, notifier, _pty_thread: Some(pty_thread) })
     }
 
     /// Add a new tab with one pane.

@@ -279,6 +279,12 @@ impl Renderer {
         }
     }
 
+    /// Dim a base ANSI color (indices 0-7) by 0.66.
+    fn dim_color(base_idx: usize) -> [f32; 4] {
+        let c = LATTE_COLORS[base_idx];
+        [c[0] * 0.66, c[1] * 0.66, c[2] * 0.66, 1.0]
+    }
+
     /// Convert vte::ansi::Color to [f32; 4] RGBA.
     fn resolve_color(color: &Color) -> [f32; 4] {
         match color {
@@ -287,13 +293,32 @@ impl Renderer {
                 if idx < 16 {
                     let c = LATTE_COLORS[idx];
                     [c[0], c[1], c[2], 1.0]
-                } else if *named == NamedColor::Foreground {
-                    [LATTE_FG[0], LATTE_FG[1], LATTE_FG[2], 1.0]
-                } else if *named == NamedColor::Background {
-                    [LATTE_BG[0], LATTE_BG[1], LATTE_BG[2], 1.0]
                 } else {
-                    // Dim/bright variants - use base fg
-                    [LATTE_FG[0], LATTE_FG[1], LATTE_FG[2], 1.0]
+                    match named {
+                        NamedColor::Foreground | NamedColor::BrightForeground => {
+                            [LATTE_FG[0], LATTE_FG[1], LATTE_FG[2], 1.0]
+                        }
+                        NamedColor::Background => {
+                            [LATTE_BG[0], LATTE_BG[1], LATTE_BG[2], 1.0]
+                        }
+                        NamedColor::Cursor => {
+                            [LATTE_FG[0], LATTE_FG[1], LATTE_FG[2], 1.0]
+                        }
+                        NamedColor::DimForeground => {
+                            let d = 0.66;
+                            [LATTE_FG[0] * d, LATTE_FG[1] * d, LATTE_FG[2] * d, 1.0]
+                        }
+                        // Dim variants: darken the base color by 0.66
+                        NamedColor::DimBlack => Self::dim_color(0),
+                        NamedColor::DimRed => Self::dim_color(1),
+                        NamedColor::DimGreen => Self::dim_color(2),
+                        NamedColor::DimYellow => Self::dim_color(3),
+                        NamedColor::DimBlue => Self::dim_color(4),
+                        NamedColor::DimMagenta => Self::dim_color(5),
+                        NamedColor::DimCyan => Self::dim_color(6),
+                        NamedColor::DimWhite => Self::dim_color(7),
+                        _ => [LATTE_FG[0], LATTE_FG[1], LATTE_FG[2], 1.0],
+                    }
                 }
             }
             Color::Spec(rgb) => {
