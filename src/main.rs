@@ -83,7 +83,7 @@ impl Koi {
             let ch = renderer.cell_height();
             let size = window.inner_size();
             let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
-            let vp_h = size.height as f32 - tab_bar_h;
+            let vp_h = (size.height as f32 - tab_bar_h).max(0.0);
             tab_manager.resize_all(size.width as f32, vp_h, cw, ch);
             window.request_redraw();
         }
@@ -102,7 +102,7 @@ impl Koi {
                 0.0
             };
             let cols = (size.width as f32 / cw) as usize;
-            let rows = ((size.height as f32 - tab_bar_h) / ch) as usize;
+            let rows = ((size.height as f32 - tab_bar_h).max(0.0) / ch) as usize;
             (cols.max(2), rows.max(1))
         } else {
             (80, 24)
@@ -226,6 +226,11 @@ impl ApplicationHandler<KoiEvent> for Koi {
         // Create tab manager with one initial tab
         let tab_manager = TabManager::new(cols, rows, cw, ch, &self.event_proxy);
 
+        // Enforce minimum window size: 2 cells wide × 1 cell tall + room for tab bar.
+        let min_w = (cw * 2.0) as u32;
+        let min_h = (ch * 2.0) as u32; // 1 row + 1 row for tab bar
+        window.set_min_inner_size(Some(winit::dpi::PhysicalSize::new(min_w, min_h)));
+
         self.renderer = Some(renderer);
         self.tab_manager = Some(tab_manager);
         self.window = Some(window);
@@ -268,9 +273,10 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     let cx = position.x as f32 * scale;
                     let cy = position.y as f32 * scale - tab_bar_h;
                     let size = window.inner_size();
-                    let viewport_h = size.height as f32 - tab_bar_h;
+                    let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
                     let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
-                    let active_id = tab_manager.active_tab().pane_tree.active_pane_id();
+                    if let Some(active_tab) = tab_manager.active_tab() {
+                    let active_id = active_tab.pane_tree.active_pane_id();
 
                     if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
                         let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
@@ -325,6 +331,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             }
                         }
                     }
+                    }
                 }
             }
             WindowEvent::MouseInput {
@@ -345,7 +352,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     let scale = window.scale_factor() as f32;
                     let cx = self.cursor_pos.0 as f32 * scale;
                     let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
-                    let viewport_h = size.height as f32 - tab_bar_h;
+                    let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
                     let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
                     for layout in &layouts {
                         if cx >= layout.x
@@ -420,14 +427,16 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             let cx = self.cursor_pos.0 as f32 * scale;
                             let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
                             let size = window.inner_size();
-                            let viewport_h = size.height as f32 - tab_bar_h;
+                            let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
                             let layouts = tab_manager.active_layouts(size.width as f32, viewport_h);
-                            let active_id = tab_manager.active_tab().pane_tree.active_pane_id();
-                            if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
-                                let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
-                                let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
-                                let seq = format!("\x1b[<0;{};{}m", col, line);
-                                pane.notifier.send_input(seq.as_bytes());
+                            if let Some(active_tab) = tab_manager.active_tab() {
+                                let active_id = active_tab.pane_tree.active_pane_id();
+                                if let Some(layout) = layouts.iter().find(|l| l.pane_id == active_id) {
+                                    let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
+                                    let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
+                                    let seq = format!("\x1b[<0;{};{}m", col, line);
+                                    pane.notifier.send_input(seq.as_bytes());
+                                }
                             }
                         }
                     }
@@ -442,7 +451,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     let ch = renderer.cell_height();
                     let w = new_size.width as f32;
                     let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
-                    let h = new_size.height as f32 - tab_bar_h;
+                    let h = (new_size.height as f32 - tab_bar_h).max(0.0);
                     tab_manager.resize_all(w, h, cw, ch);
                 }
 
@@ -498,9 +507,9 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 };
 
                 // Render all panes in the active tab
-                let viewport_h = h - tab_bar_height;
+                let viewport_h = (h - tab_bar_height).max(0.0);
                 let layouts = tab_manager.active_layouts(w, viewport_h);
-                let tab = tab_manager.active_tab();
+                if let Some(tab) = tab_manager.active_tab() {
                 let active_pane_id = tab.pane_tree.active_pane_id();
 
                 // Cursor blink: 500ms on, 500ms off — only in active pane
@@ -562,6 +571,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                         );
                     }
                 }
+                } // if let Some(tab)
 
                 renderer.flush(w, h);
                 if let Err(e) = surface.swap_buffers(context) {
@@ -616,11 +626,11 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                 } else {
                                     0.0
                                 };
-                                let vp_h = size.height as f32 - tab_bar_h;
+                                let vp_h = (size.height as f32 - tab_bar_h).max(0.0);
                                 let layouts =
                                     tab_manager.active_layouts(size.width as f32, vp_h);
-                                let active_id =
-                                    tab_manager.active_tab().pane_tree.active_pane_id();
+                                if let Some(active_tab) = tab_manager.active_tab() {
+                                let active_id = active_tab.pane_tree.active_pane_id();
 
                                 // Find active pane's center
                                 if let Some(active_layout) =
@@ -655,6 +665,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                         tab_manager.focus_pane(target.pane_id);
                                     }
                                 }
+                                } // if let Some(active_tab)
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
@@ -1088,25 +1099,26 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                     let cx = self.cursor_pos.0 as f32 * scale;
                                     let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
                                     let size = window.inner_size();
-                                    let viewport_h = size.height as f32 - tab_bar_h;
+                                    let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
                                     let layouts =
                                         tab_manager.active_layouts(size.width as f32, viewport_h);
-                                    let active_id =
-                                        tab_manager.active_tab().pane_tree.active_pane_id();
-                                    if let Some(layout) =
-                                        layouts.iter().find(|l| l.pane_id == active_id)
-                                    {
-                                        let col =
-                                            ((cx - layout.x) / cw).max(0.0) as usize + 1;
-                                        let line =
-                                            ((cy - layout.y) / ch).max(0.0) as usize + 1;
-                                        // button 64 = scroll up, 65 = scroll down
-                                        let button = if scroll_lines > 0 { 64 } else { 65 };
-                                        let count = scroll_lines.unsigned_abs();
-                                        for _ in 0..count {
-                                            let seq =
-                                                format!("\x1b[<{};{};{}M", button, col, line);
-                                            pane.notifier.send_input(seq.as_bytes());
+                                    if let Some(active_tab) = tab_manager.active_tab() {
+                                        let active_id = active_tab.pane_tree.active_pane_id();
+                                        if let Some(layout) =
+                                            layouts.iter().find(|l| l.pane_id == active_id)
+                                        {
+                                            let col =
+                                                ((cx - layout.x) / cw).max(0.0) as usize + 1;
+                                            let line =
+                                                ((cy - layout.y) / ch).max(0.0) as usize + 1;
+                                            // button 64 = scroll up, 65 = scroll down
+                                            let button = if scroll_lines > 0 { 64 } else { 65 };
+                                            let count = scroll_lines.unsigned_abs();
+                                            for _ in 0..count {
+                                                let seq =
+                                                    format!("\x1b[<{};{};{}M", button, col, line);
+                                                pane.notifier.send_input(seq.as_bytes());
+                                            }
                                         }
                                     }
                                 }
@@ -1162,7 +1174,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
                 // Only update window title if the event came from the active tab.
                 if let Some(tab_manager) = &self.tab_manager {
-                    if tab_manager.active_tab().panes.contains_key(&pane_id) {
+                    if tab_manager.active_tab().map_or(false, |t| t.panes.contains_key(&pane_id)) {
                         if let Some(w) = &self.window {
                             w.set_title(&title);
                         }

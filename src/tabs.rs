@@ -70,7 +70,11 @@ impl TabManager {
             cell_width: cell_width as u16,
             cell_height: cell_height as u16,
         };
-        let pty = tty::new(&tty::Options::default(), window_size, 0).expect("create PTY");
+        let pty_opts = tty::Options {
+            working_directory: std::env::var_os("HOME").map(std::path::PathBuf::from),
+            ..tty::Options::default()
+        };
+        let pty = tty::new(&pty_opts, window_size, 0).expect("create PTY");
 
         let pty_event_loop = PtyEventLoop::new(
             term.clone(),
@@ -158,8 +162,8 @@ impl TabManager {
         }
     }
 
-    pub fn active_tab(&self) -> &Tab {
-        &self.tabs[self.active]
+    pub fn active_tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.active)
     }
 
     /// Set the title of the tab containing the given pane.
@@ -186,7 +190,7 @@ impl TabManager {
 
     /// Get the active pane (in the active tab).
     pub fn active_pane(&self) -> Option<&Pane> {
-        let tab = self.active_tab();
+        let tab = self.active_tab()?;
         let pane_id = tab.pane_tree.active_pane_id();
         tab.panes.get(&pane_id)
     }
@@ -246,7 +250,10 @@ impl TabManager {
 
     /// Get pane layouts for the active tab.
     pub fn active_layouts(&self, width: f32, height: f32) -> Vec<PaneLayout> {
-        self.active_tab().pane_tree.calculate_layouts(width, height)
+        match self.active_tab() {
+            Some(tab) => tab.pane_tree.calculate_layouts(width, height),
+            None => Vec::new(),
+        }
     }
 
     /// Close a specific pane by ID (e.g., when its shell exits).
