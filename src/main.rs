@@ -782,6 +782,9 @@ impl KoiState {
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
 
+        // Regrow atlas between frames if it filled up during the last render.
+        self.renderer.glyph_cache.try_regrow();
+
         // Calculate viewport offset for tab bar
         let tab_bar_height = if self.tab_manager.count() > 1 {
             self.renderer.draw_tab_bar(&self.tab_manager, w);

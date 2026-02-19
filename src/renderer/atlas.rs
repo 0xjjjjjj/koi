@@ -25,11 +25,10 @@ pub struct Atlas {
 }
 
 impl Atlas {
-    pub fn new(size: i32) -> Self {
-        let mut tex_id: GLuint = 0;
+    fn alloc_texture(tex_id: &mut GLuint, size: i32) {
         unsafe {
-            gl::GenTextures(1, &mut tex_id);
-            gl::BindTexture(gl::TEXTURE_2D, tex_id);
+            gl::GenTextures(1, tex_id);
+            gl::BindTexture(gl::TEXTURE_2D, *tex_id);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
@@ -47,6 +46,11 @@ impl Atlas {
                 std::ptr::null(),
             );
         }
+    }
+
+    pub fn new(size: i32) -> Self {
+        let mut tex_id: GLuint = 0;
+        Self::alloc_texture(&mut tex_id, size);
 
         Atlas {
             tex_id,
@@ -60,6 +64,22 @@ impl Atlas {
 
     pub fn tex_id(&self) -> GLuint {
         self.tex_id
+    }
+
+    pub fn width(&self) -> i32 {
+        self.width
+    }
+
+    /// Destroy the current texture and allocate a new one at `new_size`.
+    /// Resets all packing state — callers must clear their glyph caches.
+    pub fn regrow(&mut self, new_size: i32) {
+        unsafe { gl::DeleteTextures(1, &self.tex_id); }
+        Self::alloc_texture(&mut self.tex_id, new_size);
+        self.width = new_size;
+        self.height = new_size;
+        self.row_extent = 0;
+        self.row_baseline = 0;
+        self.row_tallest = 0;
     }
 
     /// Insert a glyph into the atlas. Returns None if atlas is full.

@@ -6,6 +6,9 @@ use crossfont::{
 
 use super::atlas::{Atlas, Glyph};
 
+const INITIAL_ATLAS_SIZE: i32 = 2048;
+const MAX_ATLAS_SIZE: i32 = 8192;
+
 pub struct GlyphCache {
     rasterizer: Rasterizer,
     font_key: FontKey,
@@ -14,6 +17,7 @@ pub struct GlyphCache {
     bold_italic_key: FontKey,
     cache: HashMap<GlyphKey, Glyph>,
     atlas: Atlas,
+    needs_regrow: bool,
     pub cell_width: f32,
     pub cell_height: f32,
     pub descent: f32,
@@ -87,7 +91,8 @@ impl GlyphCache {
             italic_key,
             bold_italic_key,
             cache: HashMap::new(),
-            atlas: Atlas::new(2048),
+            atlas: Atlas::new(INITIAL_ATLAS_SIZE),
+            needs_regrow: false,
             cell_width: (cell_width as f32).ceil(),
             cell_height: (cell_height as f32).ceil(),
             descent,
@@ -96,6 +101,32 @@ impl GlyphCache {
 
     pub fn atlas_tex_id(&self) -> u32 {
         self.atlas.tex_id()
+    }
+
+    /// Regrow the atlas if it filled up during the previous frame.
+    /// Must be called before any draw calls to avoid mid-batch texture swaps.
+    pub fn try_regrow(&mut self) {
+        if !self.needs_regrow {
+            return;
+        }
+        self.needs_regrow = false;
+
+        let cur = self.atlas.width();
+        if cur >= MAX_ATLAS_SIZE {
+            log::error!(
+                "Glyph atlas at max {}x{}, cannot grow further",
+                cur, cur
+            );
+            return;
+        }
+
+        let next = (cur * 2).min(MAX_ATLAS_SIZE);
+        log::warn!(
+            "Glyph atlas full at {}x{}, regrowing to {}x{}",
+            cur, cur, next, next
+        );
+        self.atlas.regrow(next);
+        self.cache.clear();
     }
 
     pub fn get_glyph(&mut self, c: char, bold: bool, italic: bool) -> Glyph {
@@ -156,10 +187,10 @@ impl GlyphCache {
         ) {
             Some(g) => g,
             None => {
-                // Atlas full — return invisible glyph
-                log::warn!("Glyph atlas full, cannot render '{}'", c);
+                // Don't regrow mid-frame — batched glyphs already reference the
+                // current atlas texture.  Flag for regrow before the next frame.
+                self.needs_regrow = true;
                 return Glyph {
-
                     width: 0.0,
                     height: 0.0,
                     left: 0.0,
