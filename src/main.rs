@@ -386,10 +386,11 @@ impl KoiState {
                     let cw = self.renderer.cell_width();
                     let ch = self.renderer.cell_height();
                     let vp = self.window.inner_size();
+                    let tab_bar_h = if self.tab_manager.count() > 1 { ch } else { 0.0 };
                     self.tab_manager.split_active(
                         panes::Split::Vertical,
                         cols, rows, cw, ch,
-                        vp.width as f32, vp.height as f32,
+                        vp.width as f32, (vp.height as f32 - tab_bar_h).max(0.0),
                         event_proxy,
                     );
                     self.window.request_redraw();
@@ -401,10 +402,11 @@ impl KoiState {
                     let cw = self.renderer.cell_width();
                     let ch = self.renderer.cell_height();
                     let vp = self.window.inner_size();
+                    let tab_bar_h = if self.tab_manager.count() > 1 { ch } else { 0.0 };
                     self.tab_manager.split_active(
                         panes::Split::Horizontal,
                         cols, rows, cw, ch,
-                        vp.width as f32, vp.height as f32,
+                        vp.width as f32, (vp.height as f32 - tab_bar_h).max(0.0),
                         event_proxy,
                     );
                     self.window.request_redraw();
