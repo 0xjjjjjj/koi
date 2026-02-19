@@ -902,7 +902,9 @@ impl ApplicationHandler<KoiEvent> for Koi {
             .build(event_loop, template, |configs| {
                 configs
                     .reduce(|accum, config| {
-                        if config.num_samples() > accum.num_samples() {
+                        // Prefer fewest MSAA samples — MSAA conflicts with
+                        // dual-source subpixel blending and wastes VRAM.
+                        if config.num_samples() < accum.num_samples() {
                             config
                         } else {
                             accum
