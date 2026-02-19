@@ -913,11 +913,31 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     pane.term.lock().mode().contains(TermMode::APP_CURSOR)
                 };
 
+                // CSI modifier parameter: 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0)
+                // When modifier > 1, named keys use forms like \x1b[1;3A (Alt+Up)
+                let modifier = 1
+                    + if shift_pressed { 1 } else { 0 }
+                    + if alt_pressed { 2 } else { 0 }
+                    + if ctrl_pressed { 4 } else { 0 };
+                let has_modifier = modifier > 1;
+
                 let bytes: Option<Cow<'static, [u8]>> = match event.logical_key {
                     Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
                     Key::Named(NamedKey::Backspace) => Some(Cow::Borrowed(b"\x7f")),
                     Key::Named(NamedKey::Tab) => Some(Cow::Borrowed(b"\t")),
                     Key::Named(NamedKey::Escape) => Some(Cow::Borrowed(b"\x1b")),
+                    Key::Named(NamedKey::ArrowUp) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}A", modifier).into_bytes())),
+                    Key::Named(NamedKey::ArrowDown) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}B", modifier).into_bytes())),
+                    Key::Named(NamedKey::ArrowRight) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}C", modifier).into_bytes())),
+                    Key::Named(NamedKey::ArrowLeft) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}D", modifier).into_bytes())),
+                    Key::Named(NamedKey::Home) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}H", modifier).into_bytes())),
+                    Key::Named(NamedKey::End) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}F", modifier).into_bytes())),
                     Key::Named(NamedKey::ArrowUp) => Some(Cow::Borrowed(
                         if app_cursor { b"\x1bOA" } else { b"\x1b[A" }
                     )),
@@ -936,20 +956,50 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     Key::Named(NamedKey::End) => Some(Cow::Borrowed(
                         if app_cursor { b"\x1bOF" } else { b"\x1b[F" }
                     )),
+                    Key::Named(NamedKey::Delete) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[3;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::Delete) => Some(Cow::Borrowed(b"\x1b[3~")),
+                    Key::Named(NamedKey::PageUp) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[5;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::PageUp) => Some(Cow::Borrowed(b"\x1b[5~")),
+                    Key::Named(NamedKey::PageDown) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[6;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::PageDown) => Some(Cow::Borrowed(b"\x1b[6~")),
+                    Key::Named(NamedKey::F1) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}P", modifier).into_bytes())),
+                    Key::Named(NamedKey::F2) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}Q", modifier).into_bytes())),
+                    Key::Named(NamedKey::F3) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}R", modifier).into_bytes())),
+                    Key::Named(NamedKey::F4) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[1;{}S", modifier).into_bytes())),
                     Key::Named(NamedKey::F1) => Some(Cow::Borrowed(b"\x1bOP")),
                     Key::Named(NamedKey::F2) => Some(Cow::Borrowed(b"\x1bOQ")),
                     Key::Named(NamedKey::F3) => Some(Cow::Borrowed(b"\x1bOR")),
                     Key::Named(NamedKey::F4) => Some(Cow::Borrowed(b"\x1bOS")),
+                    Key::Named(NamedKey::F5) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[15;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::F5) => Some(Cow::Borrowed(b"\x1b[15~")),
+                    Key::Named(NamedKey::F6) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[17;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::F6) => Some(Cow::Borrowed(b"\x1b[17~")),
+                    Key::Named(NamedKey::F7) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[18;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::F7) => Some(Cow::Borrowed(b"\x1b[18~")),
+                    Key::Named(NamedKey::F8) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[19;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::F8) => Some(Cow::Borrowed(b"\x1b[19~")),
+                    Key::Named(NamedKey::F9) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[20;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::F9) => Some(Cow::Borrowed(b"\x1b[20~")),
+                    Key::Named(NamedKey::F10) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[21;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::F10) => Some(Cow::Borrowed(b"\x1b[21~")),
+                    Key::Named(NamedKey::F11) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[23;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::F11) => Some(Cow::Borrowed(b"\x1b[23~")),
+                    Key::Named(NamedKey::F12) if has_modifier =>
+                        Some(Cow::Owned(format!("\x1b[24;{}~", modifier).into_bytes())),
                     Key::Named(NamedKey::F12) => Some(Cow::Borrowed(b"\x1b[24~")),
                     Key::Named(NamedKey::Space) => {
                         if ctrl_pressed {
