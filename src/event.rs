@@ -45,6 +45,10 @@ impl EventListener for EventProxy {
             TermEvent::Title(title) => KoiEvent::Title(title),
             TermEvent::ChildExit(code) => KoiEvent::ChildExit(self.pane_id, code),
             TermEvent::Bell => KoiEvent::Bell,
+            // Security: intentionally block these events.
+            // - ClipboardStore/Load: blocks OSC 52 clipboard exfiltration
+            // - PtyWrite: blocks DECRQSS echo-back attacks
+            // - ColorRequest: blocks terminal color information leaks
             _ => return,
         };
         let _ = self.proxy.send_event(koi_event);

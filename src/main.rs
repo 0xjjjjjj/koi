@@ -48,6 +48,8 @@ struct Koi {
     mouse_left_pressed: bool,
     needs_redraw: bool,
     font_size: f32,
+    scale: f32,
+    scroll_accumulator: f64,
 }
 
 impl Koi {
@@ -65,11 +67,13 @@ impl Koi {
             mouse_left_pressed: false,
             needs_redraw: true,
             font_size: 14.0,
+            scale: 1.0,
+            scroll_accumulator: 0.0,
         }
     }
 
     fn rebuild_renderer(&mut self) {
-        self.renderer = Some(Renderer::new("IBM Plex Mono", self.font_size));
+        self.renderer = Some(Renderer::new("IBM Plex Mono", self.font_size, self.scale));
         if let (Some(renderer), Some(window), Some(tab_manager)) =
             (&self.renderer, &self.window, &self.tab_manager)
         {
@@ -86,17 +90,17 @@ impl Koi {
 
     fn grid_size(&self) -> (usize, usize) {
         if let (Some(renderer), Some(window)) = (&self.renderer, &self.window) {
-            let scale = window.scale_factor() as f32;
             let size = window.inner_size();
+            let cw = renderer.cell_width();
             let ch = renderer.cell_height();
-            // Subtract tab bar height when multiple tabs exist
+            // Cell dimensions are already in physical pixels (scaled at rasterization).
             let tab_bar_h = if self.tab_manager.as_ref().map_or(false, |t| t.count() > 1) {
-                ch * scale
+                ch
             } else {
                 0.0
             };
-            let cols = (size.width as f32 / (renderer.cell_width() * scale)) as usize;
-            let rows = ((size.height as f32 - tab_bar_h) / (ch * scale)) as usize;
+            let cols = (size.width as f32 / cw) as usize;
+            let rows = ((size.height as f32 - tab_bar_h) / ch) as usize;
             (cols.max(2), rows.max(1))
         } else {
             (80, 24)
@@ -200,16 +204,19 @@ impl ApplicationHandler<KoiEvent> for Koi {
         // Setup terminal environment (TERM, COLORTERM).
         alacritty_terminal::tty::setup_env();
 
-        // Create renderer after GL is initialized
-        let renderer = Renderer::new("IBM Plex Mono", 14.0);
+        // Store scale factor for DPI-aware font rendering.
+        let scale = window.scale_factor() as f32;
+        self.scale = scale;
+
+        // Create renderer — font is rasterized at font_size * scale for HiDPI.
+        let renderer = Renderer::new("IBM Plex Mono", self.font_size, scale);
         let cw = renderer.cell_width();
         let ch = renderer.cell_height();
-        log::info!("Cell size: {}x{}", cw, ch);
+        log::info!("Cell size: {}x{} (scale={})", cw, ch, scale);
 
-        // Calculate terminal grid size (physical pixels / (logical cell * scale))
-        let scale = window.scale_factor() as f32;
-        let cols = (size.width as f32 / (cw * scale)) as usize;
-        let rows = (size.height as f32 / (ch * scale)) as usize;
+        // Cell dimensions are in physical pixels, so divide viewport directly.
+        let cols = (size.width as f32 / cw) as usize;
+        let rows = (size.height as f32 / ch) as usize;
         let cols = cols.max(2);
         let rows = rows.max(1);
         log::info!("Terminal grid: {}x{}", cols, rows);
@@ -555,7 +562,9 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
 
                 renderer.flush(w, h);
-                surface.swap_buffers(context).unwrap();
+                if let Err(e) = surface.swap_buffers(context) {
+                    log::error!("swap_buffers failed: {}", e);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
@@ -686,6 +695,17 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                     event_loop.exit();
                                     return;
                                 }
+                                // Resize surviving panes to fill the freed space.
+                                if let (Some(renderer), Some(window)) =
+                                    (&self.renderer, &self.window)
+                                {
+                                    let size = window.inner_size();
+                                    let cw = renderer.cell_width();
+                                    let ch = renderer.cell_height();
+                                    let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
+                                    let h = size.height as f32 - tab_bar_h;
+                                    tab_manager.resize_all(size.width as f32, h, cw, ch);
+                                }
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
@@ -812,17 +832,27 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             }
                             return;
                         }
-                        // Cmd+V: Paste from clipboard (image first, then text)
+                        // Cmd+V: Paste from clipboard
                         Key::Character(ref s) if s == "v" => {
                             if let Some(tab_manager) = &self.tab_manager {
                                 if let Some(pane) = tab_manager.active_pane() {
                                     if let Some(text) = clipboard_paste() {
-                                        let sanitized = text.replace("\x1b[201~", "");
-                                        let mut bytes = Vec::new();
-                                        bytes.extend_from_slice(b"\x1b[200~");
-                                        bytes.extend_from_slice(sanitized.as_bytes());
-                                        bytes.extend_from_slice(b"\x1b[201~");
-                                        pane.notifier.send_input(&bytes);
+                                        use alacritty_terminal::term::TermMode;
+                                        let bracketed = pane.term.lock().mode()
+                                            .contains(TermMode::BRACKETED_PASTE);
+                                        if bracketed {
+                                            // Sanitize: strip both bracket markers from content.
+                                            let sanitized = text
+                                                .replace("\x1b[200~", "")
+                                                .replace("\x1b[201~", "");
+                                            let mut bytes = Vec::new();
+                                            bytes.extend_from_slice(b"\x1b[200~");
+                                            bytes.extend_from_slice(sanitized.as_bytes());
+                                            bytes.extend_from_slice(b"\x1b[201~");
+                                            pane.notifier.send_input(&bytes);
+                                        } else {
+                                            pane.notifier.send_input(text.as_bytes());
+                                        }
                                     }
                                 }
                             }
@@ -970,10 +1000,16 @@ impl ApplicationHandler<KoiEvent> for Koi {
             WindowEvent::MouseWheel { delta, .. } => {
                 self.needs_redraw = true;
                 let scroll_lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as i32,
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                        self.scroll_accumulator = 0.0;
+                        y as i32
+                    }
                     winit::event::MouseScrollDelta::PixelDelta(pos) => {
                         let ch = self.renderer.as_ref().map(|r| r.cell_height()).unwrap_or(20.0);
-                        (pos.y / ch as f64) as i32
+                        self.scroll_accumulator += pos.y / ch as f64;
+                        let lines = self.scroll_accumulator as i32;
+                        self.scroll_accumulator -= lines as f64;
+                        lines
                     }
                 };
                 if scroll_lines != 0 {
@@ -985,6 +1021,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                             let mode = term.mode();
                             let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
                             let sgr = mode.contains(TermMode::SGR_MOUSE);
+                            let alt_screen = mode.contains(TermMode::ALT_SCREEN);
                             drop(term);
 
                             if mouse_mode && sgr {
@@ -1021,6 +1058,14 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                         }
                                     }
                                 }
+                            } else if alt_screen {
+                                // On alternate screen (vim, less, Claude Code), send arrow
+                                // keys instead of scroll_display — there's no scrollback.
+                                let key = if scroll_lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
+                                let count = scroll_lines.unsigned_abs();
+                                for _ in 0..count {
+                                    pane.notifier.send_input(key);
+                                }
                             } else {
                                 use alacritty_terminal::grid::Scroll;
                                 pane.term.lock().scroll_display(Scroll::Delta(scroll_lines));
@@ -1029,6 +1074,15 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     }
                     if let Some(w) = &self.window {
                         w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(window) = &self.window {
+                    let new_scale = window.scale_factor() as f32;
+                    if (new_scale - self.scale).abs() > 0.01 {
+                        self.scale = new_scale;
+                        self.rebuild_renderer();
                     }
                 }
             }
@@ -1046,6 +1100,11 @@ impl ApplicationHandler<KoiEvent> for Koi {
             }
             KoiEvent::Title(title) => {
                 self.needs_redraw = true;
+                // Sanitize: strip control chars, limit length.
+                let title: String = title.chars()
+                    .filter(|c| !c.is_control())
+                    .take(256)
+                    .collect();
                 if let Some(w) = &self.window {
                     w.set_title(&title);
                 }
@@ -1060,6 +1119,17 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     if tab_manager.close_pane_by_id(pane_id) {
                         event_loop.exit();
                         return;
+                    }
+                    // Resize surviving panes to fill freed space.
+                    if let (Some(renderer), Some(window)) =
+                        (&self.renderer, &self.window)
+                    {
+                        let size = window.inner_size();
+                        let cw = renderer.cell_width();
+                        let ch = renderer.cell_height();
+                        let tab_bar_h = if tab_manager.count() > 1 { ch } else { 0.0 };
+                        let h = size.height as f32 - tab_bar_h;
+                        tab_manager.resize_all(size.width as f32, h, cw, ch);
                     }
                 }
                 if let Some(w) = &self.window {

@@ -31,7 +31,17 @@ impl GlyphCache {
 
         let font_key = rasterizer
             .load_font(&font_desc, size)
-            .expect("load font");
+            .unwrap_or_else(|_| {
+                log::warn!("Font '{}' not found, falling back to Menlo", font_family);
+                let fallback = FontDesc::new(
+                    "Menlo",
+                    Style::Description {
+                        slant: Slant::Normal,
+                        weight: Weight::Normal,
+                    },
+                );
+                rasterizer.load_font(&fallback, size).expect("load fallback font")
+            });
 
         let metrics = rasterizer.metrics(font_key, size).expect("font metrics");
         let cell_width = metrics.average_advance;

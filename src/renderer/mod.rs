@@ -43,8 +43,9 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(font_family: &str, font_size: f32) -> Self {
-        let glyph_cache = GlyphCache::new(font_family, font_size);
+    pub fn new(font_family: &str, font_size: f32, scale: f32) -> Self {
+        // Rasterize at physical pixel size so glyphs are sharp on HiDPI/Retina.
+        let glyph_cache = GlyphCache::new(font_family, font_size * scale);
         let text_renderer = TextRenderer::new();
         let rect_renderer = RectRenderer::new();
 
@@ -181,6 +182,15 @@ impl Renderer {
 
             let cell = &indexed.cell;
 
+            // Skip spacer cells for wide characters (already drawn by the wide cell).
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+
+            // Wide chars (CJK, emoji) occupy two columns.
+            let is_wide = cell.flags.contains(Flags::WIDE_CHAR);
+            let draw_cw = if is_wide { cw * 2.0 } else { cw };
+
             // Resolve colors, respecting INVERSE flag.
             let (mut fg_color, mut bg_color) = (
                 Self::resolve_color(&cell.fg),
@@ -196,7 +206,7 @@ impl Renderer {
                 && (bg_color[1] - LATTE_BG[1]).abs() < 1e-4
                 && (bg_color[2] - LATTE_BG[2]).abs() < 1e-4;
             if !is_default_bg {
-                self.draw_rect(cell_x, cell_y, cw, ch, bg_color);
+                self.draw_rect(cell_x, cell_y, draw_cw, ch, bg_color);
             }
 
             // Selection highlight
@@ -206,7 +216,7 @@ impl Renderer {
                     indexed.point.column,
                 );
                 if sel.contains(point) {
-                    self.draw_rect(cell_x, cell_y, cw, ch, [0.122, 0.471, 0.706, 0.3]);
+                    self.draw_rect(cell_x, cell_y, draw_cw, ch, [0.122, 0.471, 0.706, 0.3]);
                 }
             }
 
