@@ -45,6 +45,7 @@ struct Koi {
     modifiers: ModifiersState,
     cursor_pos: (f64, f64),
     cursor_blink: std::time::Instant,
+    last_blink_on: bool,
     mouse_left_pressed: bool,
     needs_redraw: bool,
     font_size: f32,
@@ -64,6 +65,7 @@ impl Koi {
             modifiers: ModifiersState::empty(),
             cursor_pos: (0.0, 0.0),
             cursor_blink: std::time::Instant::now(),
+            last_blink_on: true,
             mouse_left_pressed: false,
             needs_redraw: true,
             font_size: 14.0,
@@ -1202,14 +1204,19 @@ impl ApplicationHandler<KoiEvent> for Koi {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Schedule periodic redraws so the cursor blink animates when idle.
+        // Only redraw when cursor blink phase actually changes.
         if self.window.is_some() {
+            let blink_on = (self.cursor_blink.elapsed().as_millis() % 1000) < 500;
+            if blink_on != self.last_blink_on {
+                self.last_blink_on = blink_on;
+                self.needs_redraw = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
                 std::time::Instant::now() + std::time::Duration::from_millis(500),
             ));
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
         }
     }
 }
