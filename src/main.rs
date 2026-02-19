@@ -39,9 +39,6 @@ fn clipboard_copy(text: &str) {
 struct MouseHit {
     col: usize,
     line: usize,
-    cx: f32,
-    cw: f32,
-    layout_x: f32,
 }
 
 /// Initialized application state — only exists after `resumed()`.
@@ -58,6 +55,7 @@ struct KoiState {
     mouse_left_pressed: bool,
     needs_redraw: bool,
     scroll_accumulator: f64,
+    auto_scroll_delta: i32,
 }
 
 impl KoiState {
@@ -77,7 +75,7 @@ impl KoiState {
         let layout = layouts.iter().find(|l| l.pane_id == active_id)?;
         let col = ((cx - layout.x) / cw).max(0.0) as usize + 1;
         let line = ((cy - layout.y) / ch).max(0.0) as usize + 1;
-        Some(MouseHit { col, line, cx, cw, layout_x: layout.x })
+        Some(MouseHit { col, line })
     }
 
     fn grid_size(&self) -> (usize, usize) {
@@ -111,43 +109,79 @@ impl KoiState {
         }
         self.needs_redraw = true;
 
-        if let Some(hit) = self.mouse_hit() {
-            let grid_col = hit.col.saturating_sub(1);
-            let grid_line = (hit.line as i32).saturating_sub(1);
-            let point = alacritty_terminal::index::Point::new(
-                alacritty_terminal::index::Line(grid_line),
-                alacritty_terminal::index::Column(grid_col),
-            );
-            let side = if ((hit.cx - hit.layout_x) % hit.cw) > hit.cw / 2.0 {
-                alacritty_terminal::index::Side::Right
+        let cw = self.renderer.cell_width();
+        let ch = self.renderer.cell_height();
+        let tab_bar_h = if self.tab_manager.count() > 1 { ch } else { 0.0 };
+        let scale = self.window.scale_factor() as f32;
+        let cx = self.cursor_pos.0 as f32 * scale;
+        let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+        let size = self.window.inner_size();
+        let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
+        let layouts = self.tab_manager.active_layouts(size.width as f32, viewport_h);
+        let active_tab = self.tab_manager.active_tab();
+        let active_id = active_tab.map(|t| t.pane_tree.active_pane_id());
+        let layout = active_id.and_then(|id| layouts.iter().find(|l| l.pane_id == id));
+
+        let Some(layout) = layout else { return };
+        let layout_y = layout.y;
+        let layout_h = layout.height;
+        let layout_x = layout.x;
+
+        // Detect out-of-bounds for auto-scroll during selection drag.
+        let rows = (layout_h / ch) as i32;
+        if cy < layout_y {
+            // Cursor above pane — scroll up.
+            self.auto_scroll_delta = -1;
+        } else if cy > layout_y + layout_h {
+            // Cursor below pane — scroll down.
+            self.auto_scroll_delta = 1;
+        } else {
+            self.auto_scroll_delta = 0;
+        }
+
+        // Clamp grid position for selection update.
+        let col = ((cx - layout_x) / cw).max(0.0) as usize + 1;
+        let raw_line = ((cy - layout_y) / ch) as i32;
+        let line = raw_line.clamp(0, rows.saturating_sub(1));
+
+        let grid_col = col.saturating_sub(1);
+        let point = alacritty_terminal::index::Point::new(
+            alacritty_terminal::index::Line(line),
+            alacritty_terminal::index::Column(grid_col),
+        );
+        let side = if ((cx - layout_x) % cw) > cw / 2.0 {
+            alacritty_terminal::index::Side::Right
+        } else {
+            alacritty_terminal::index::Side::Left
+        };
+
+        // Single lock: check mode + update selection in one scope.
+        if let Some(pane) = self.tab_manager.active_pane() {
+            use alacritty_terminal::term::TermMode;
+            let mut term = pane.term.lock();
+            let mode = term.mode();
+            let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
+            let sgr = mode.contains(TermMode::SGR_MOUSE);
+            let motion = mode.contains(TermMode::MOUSE_MOTION)
+                || mode.contains(TermMode::MOUSE_DRAG);
+
+            if mouse_mode && motion && sgr {
+                drop(term);
+                pane.notifier.send_bytes(
+                    format!("\x1b[<32;{};{}M", col, line as usize + 1).into_bytes(),
+                );
             } else {
-                alacritty_terminal::index::Side::Left
-            };
-
-            // Single lock: check mode + update selection in one scope.
-            if let Some(pane) = self.tab_manager.active_pane() {
-                use alacritty_terminal::term::TermMode;
-                let mut term = pane.term.lock();
-                let mode = term.mode();
-                let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
-                let sgr = mode.contains(TermMode::SGR_MOUSE);
-                let motion = mode.contains(TermMode::MOUSE_MOTION)
-                    || mode.contains(TermMode::MOUSE_DRAG);
-
-                if mouse_mode && motion && sgr {
-                    drop(term);
-                    pane.notifier.send_bytes(
-                        format!("\x1b[<32;{};{}M", hit.col, hit.line).into_bytes(),
-                    );
-                } else {
-                    // Normal selection drag — update in same lock.
-                    if let Some(ref mut sel) = term.selection {
-                        sel.update(point, side);
-                    }
+                // Scroll immediately if OOB, then update selection.
+                if self.auto_scroll_delta != 0 {
+                    use alacritty_terminal::grid::Scroll;
+                    term.scroll_display(Scroll::Delta(self.auto_scroll_delta));
+                }
+                if let Some(ref mut sel) = term.selection {
+                    sel.update(point, side);
                 }
             }
-            self.window.request_redraw();
         }
+        self.window.request_redraw();
     }
 
     fn handle_mouse_press(&mut self) {
@@ -213,6 +247,7 @@ impl KoiState {
 
     fn handle_mouse_release(&mut self) {
         self.mouse_left_pressed = false;
+        self.auto_scroll_delta = 0;
         if let Some(pane) = self.tab_manager.active_pane() {
             use alacritty_terminal::term::TermMode;
             let term = pane.term.lock();
@@ -646,6 +681,15 @@ impl KoiState {
         };
 
         if let Some(bytes) = bytes {
+            // Snap to bottom when typing while scrolled up (like iTerm2/Alacritty).
+            {
+                use alacritty_terminal::grid::Scroll;
+                let mut term = pane.term.lock();
+                if term.grid().display_offset() != 0 {
+                    term.scroll_display(Scroll::Bottom);
+                    self.needs_redraw = true;
+                }
+            }
             notifier.send_input(&bytes);
         }
         false
@@ -972,6 +1016,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
             mouse_left_pressed: false,
             needs_redraw: true,
             scroll_accumulator: 0.0,
+            auto_scroll_delta: 0,
         });
 
         // Trigger initial draw
@@ -1058,6 +1103,8 @@ impl ApplicationHandler<KoiEvent> for Koi {
             }
             KoiEvent::ChildExit(pane_id, code) => {
                 s.needs_redraw = true;
+                s.auto_scroll_delta = 0;
+                s.mouse_left_pressed = false;
                 log::info!("Pane {} exited with code {}", pane_id, code);
                 if s.tab_manager.close_pane_by_id(pane_id) {
                     event_loop.exit();
@@ -1084,6 +1131,63 @@ impl ApplicationHandler<KoiEvent> for Koi {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(s) = &mut self.state {
+            // Auto-scroll during selection drag past viewport edge.
+            if s.mouse_left_pressed && s.auto_scroll_delta != 0 {
+                if let Some(pane) = s.tab_manager.active_pane() {
+                    use alacritty_terminal::grid::{Dimensions, Scroll};
+                    use alacritty_terminal::term::TermMode;
+                    let mut term = pane.term.lock();
+
+                    // Skip auto-scroll when the app owns mouse input (vim, tmux).
+                    let mode = term.mode();
+                    if mode.intersects(TermMode::MOUSE_MODE) && mode.contains(TermMode::SGR_MOUSE) {
+                        drop(term);
+                        s.auto_scroll_delta = 0;
+                    } else {
+                        term.scroll_display(Scroll::Delta(s.auto_scroll_delta));
+
+                        // Extend selection to the edge row.
+                        let ch = s.renderer.cell_height();
+                        let rows = {
+                            let tab_bar_h = if s.tab_manager.count() > 1 { ch } else { 0.0 };
+                            let size = s.window.inner_size();
+                            let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
+                            let layouts = s.tab_manager.active_layouts(size.width as f32, viewport_h);
+                            let active_id = s.tab_manager.active_tab()
+                                .map(|t| t.pane_tree.active_pane_id());
+                            active_id
+                                .and_then(|id| layouts.iter().find(|l| l.pane_id == id))
+                                .map(|l| (l.height / ch) as i32)
+                                .unwrap_or(1)
+                        };
+
+                        let edge_line = if s.auto_scroll_delta < 0 { 0 } else { (rows - 1).max(0) };
+                        let cols = term.grid().columns();
+                        let edge_col = if s.auto_scroll_delta < 0 { 0 } else { cols.saturating_sub(1) };
+                        let edge_side = if s.auto_scroll_delta < 0 {
+                            alacritty_terminal::index::Side::Left
+                        } else {
+                            alacritty_terminal::index::Side::Right
+                        };
+                        let point = alacritty_terminal::index::Point::new(
+                            alacritty_terminal::index::Line(edge_line),
+                            alacritty_terminal::index::Column(edge_col),
+                        );
+                        if let Some(ref mut sel) = term.selection {
+                            sel.update(point, edge_side);
+                        }
+                        drop(term);
+                    }
+                }
+                s.needs_redraw = true;
+                s.window.request_redraw();
+                // Tick faster while auto-scrolling for smooth UX.
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+                    std::time::Instant::now() + std::time::Duration::from_millis(50),
+                ));
+                return;
+            }
+
             // Only redraw when cursor blink phase actually changes.
             let blink_on = (s.cursor_blink.elapsed().as_millis() % 1000) < 500;
             if blink_on != s.last_blink_on {
