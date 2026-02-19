@@ -61,8 +61,8 @@ impl GlyphCache {
             font_key,
             cache: HashMap::new(),
             atlas: Atlas::new(1024),
-            cell_width: cell_width as f32,
-            cell_height: cell_height as f32,
+            cell_width: (cell_width as f32).ceil(),
+            cell_height: (cell_height as f32).ceil(),
             descent: descent as f32,
         }
     }
