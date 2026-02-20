@@ -261,6 +261,19 @@ impl TabManager {
         self.tabs[self.active].pane_tree.focus_prev();
     }
 
+    /// Get divider info for the active tab.
+    pub fn active_dividers(&self, width: f32, height: f32) -> Vec<crate::panes::DividerInfo> {
+        match self.active_tab() {
+            Some(tab) => tab.pane_tree.collect_dividers(width, height),
+            None => Vec::new(),
+        }
+    }
+
+    /// Update the ratio of a split in the active tab.
+    pub fn set_split_ratio(&mut self, path: &[bool], ratio: f32) {
+        self.tabs[self.active].pane_tree.set_ratio_at(path, ratio);
+    }
+
     /// Get pane layouts for the active tab.
     pub fn active_layouts(&self, width: f32, height: f32) -> Vec<PaneLayout> {
         match self.active_tab() {
@@ -351,6 +364,13 @@ impl TabManager {
     /// Resize all panes in all tabs using per-pane layout dimensions.
     pub fn resize_all(&self, width: f32, height: f32, cell_width: f32, cell_height: f32) {
         for tab in &self.tabs {
+            Self::resize_tab_panes(tab, width, height, cell_width, cell_height);
+        }
+    }
+
+    /// Resize only the active tab's panes (e.g. during divider drag).
+    pub fn resize_active_tab(&self, width: f32, height: f32, cell_width: f32, cell_height: f32) {
+        if let Some(tab) = self.active_tab() {
             Self::resize_tab_panes(tab, width, height, cell_width, cell_height);
         }
     }

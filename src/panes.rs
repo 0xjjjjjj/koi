@@ -13,6 +13,22 @@ pub struct PaneLayout {
     pub height: f32,
 }
 
+/// Describes a draggable divider between two pane regions.
+pub struct DividerInfo {
+    pub split: Split,
+    /// Pixel position of the divider line (x for vertical, y for horizontal).
+    pub position: f32,
+    /// Start of the split dimension (x for vertical, y for horizontal).
+    pub origin: f32,
+    /// Total span of the split dimension (width for vertical, height for horizontal).
+    pub span: f32,
+    /// Perpendicular bounds for hit-testing.
+    pub perp_start: f32,
+    pub perp_end: f32,
+    /// Path from root to this split node (false=left, true=right at each ancestor).
+    pub path: Vec<bool>,
+}
+
 enum Node {
     Leaf { pane_id: usize },
     Split {
@@ -38,6 +54,67 @@ impl Node {
         match self {
             Node::Leaf { .. } => 1,
             Node::Split { left, right, .. } => left.pane_count() + right.pane_count(),
+        }
+    }
+
+    fn collect_dividers(
+        &self, x: f32, y: f32, w: f32, h: f32,
+        path: &mut Vec<bool>, dividers: &mut Vec<DividerInfo>,
+    ) {
+        if let Node::Split { split, ratio, left, right } = self {
+            match split {
+                Split::Vertical => {
+                    let left_w = (w * ratio).floor();
+                    dividers.push(DividerInfo {
+                        split: Split::Vertical,
+                        position: x + left_w,
+                        origin: x,
+                        span: w,
+                        perp_start: y,
+                        perp_end: y + h,
+                        path: path.clone(),
+                    });
+                    path.push(false);
+                    left.collect_dividers(x, y, left_w, h, path, dividers);
+                    path.pop();
+                    path.push(true);
+                    right.collect_dividers(x + left_w, y, w - left_w, h, path, dividers);
+                    path.pop();
+                }
+                Split::Horizontal => {
+                    let top_h = (h * ratio).floor();
+                    dividers.push(DividerInfo {
+                        split: Split::Horizontal,
+                        position: y + top_h,
+                        origin: y,
+                        span: h,
+                        perp_start: x,
+                        perp_end: x + w,
+                        path: path.clone(),
+                    });
+                    path.push(false);
+                    left.collect_dividers(x, y, w, top_h, path, dividers);
+                    path.pop();
+                    path.push(true);
+                    right.collect_dividers(x, y + top_h, w, h - top_h, path, dividers);
+                    path.pop();
+                }
+            }
+        }
+    }
+
+    fn set_ratio_at(&mut self, path: &[bool], ratio: f32) {
+        match self {
+            Node::Split { ratio: r, left, right, .. } => {
+                if path.is_empty() {
+                    *r = ratio;
+                } else if path[0] {
+                    right.set_ratio_at(&path[1..], ratio);
+                } else {
+                    left.set_ratio_at(&path[1..], ratio);
+                }
+            }
+            Node::Leaf { .. } => {}
         }
     }
 
@@ -261,6 +338,19 @@ impl PaneTree {
         ids
     }
 
+    /// Collect all divider positions for hit-testing.
+    pub fn collect_dividers(&self, width: f32, height: f32) -> Vec<DividerInfo> {
+        let mut dividers = Vec::new();
+        let mut path = Vec::new();
+        self.root.collect_dividers(0.0, 0.0, width, height, &mut path, &mut dividers);
+        dividers
+    }
+
+    /// Update the ratio of a split node identified by its tree path.
+    pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) {
+        self.root.set_ratio_at(path, ratio);
+    }
+
     /// Calculate pixel layouts for all panes in the given viewport.
     pub fn calculate_layouts(&self, width: f32, height: f32) -> Vec<PaneLayout> {
         if self.zoomed {
@@ -442,5 +532,48 @@ mod tests {
         assert_eq!(layouts.len(), 1);
         assert!((layouts[0].width).abs() < 0.01);
         assert!((layouts[0].height).abs() < 0.01);
+    }
+
+    #[test]
+    fn divider_positions_match_split() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        let dividers = tree.collect_dividers(800.0, 600.0);
+        assert_eq!(dividers.len(), 1);
+        let d = &dividers[0];
+        assert_eq!(d.split, Split::Vertical);
+        assert!((d.position - 400.0).abs() < 1.0); // 50% of 800
+        assert!(d.path.is_empty()); // root split
+    }
+
+    #[test]
+    fn set_ratio_changes_layout() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        tree.set_ratio_at(&[], 0.75);
+        let layouts = tree.calculate_layouts(800.0, 600.0);
+        // Left pane should be 75% of 800 = 600
+        let left = layouts.iter().find(|l| l.pane_id == 0).unwrap();
+        assert!((left.width - 600.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn nested_dividers_addressable_by_path() {
+        let mut tree = PaneTree::new(0);
+        tree.split_active(Split::Vertical, 1);
+        // Active is 1 (right child). Split it horizontally.
+        tree.split_active(Split::Horizontal, 2);
+        let dividers = tree.collect_dividers(800.0, 600.0);
+        assert_eq!(dividers.len(), 2);
+
+        // Update the nested split (path=[true] = right child of root).
+        let nested = dividers.iter().find(|d| d.split == Split::Horizontal).unwrap();
+        assert_eq!(nested.path, vec![true]);
+        tree.set_ratio_at(&nested.path, 0.25);
+
+        let layouts = tree.calculate_layouts(800.0, 600.0);
+        // Pane 1 (top-right) should be 25% of 600 = 150 height
+        let pane1 = layouts.iter().find(|l| l.pane_id == 1).unwrap();
+        assert!((pane1.height - 150.0).abs() < 1.0);
     }
 }

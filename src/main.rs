@@ -41,6 +41,14 @@ struct MouseHit {
     line: usize,
 }
 
+/// State for an in-progress divider drag.
+struct DividerDrag {
+    path: Vec<bool>,
+    split: panes::Split,
+    origin: f32,
+    span: f32,
+}
+
 /// Initialized application state — only exists after `resumed()`.
 struct KoiState {
     window: Window,
@@ -56,6 +64,7 @@ struct KoiState {
     needs_redraw: bool,
     scroll_accumulator: f64,
     auto_scroll_delta: i32,
+    divider_drag: Option<DividerDrag>,
 }
 
 impl KoiState {
@@ -115,6 +124,25 @@ impl KoiState {
         let scale = self.window.scale_factor() as f32;
         let cx = self.cursor_pos.0 as f32 * scale;
         let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+
+        // Handle divider drag — update ratio and resize panes.
+        if let Some(ref drag) = self.divider_drag {
+            if drag.span < 1.0 {
+                return;
+            }
+            let cursor_along = match drag.split {
+                panes::Split::Vertical => cx,
+                panes::Split::Horizontal => cy,
+            };
+            let ratio = ((cursor_along - drag.origin) / drag.span).clamp(0.1, 0.9);
+            let path = drag.path.clone();
+            self.tab_manager.set_split_ratio(&path, ratio);
+            let size = self.window.inner_size();
+            let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
+            self.tab_manager.resize_active_tab(size.width as f32, viewport_h, cw, ch);
+            self.window.request_redraw();
+            return;
+        }
         let size = self.window.inner_size();
         let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
         let layouts = self.tab_manager.active_layouts(size.width as f32, viewport_h);
@@ -196,6 +224,29 @@ impl KoiState {
         let cx = self.cursor_pos.0 as f32 * scale;
         let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
         let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
+
+        // Check if cursor is on a divider (4px threshold).
+        let dividers = self.tab_manager.active_dividers(size.width as f32, viewport_h);
+        const THRESHOLD: f32 = 4.0;
+        for div in &dividers {
+            let (along, perp) = match div.split {
+                panes::Split::Vertical => (cx, cy),
+                panes::Split::Horizontal => (cy, cx),
+            };
+            if (along - div.position).abs() <= THRESHOLD
+                && perp >= div.perp_start
+                && perp <= div.perp_end
+            {
+                self.divider_drag = Some(DividerDrag {
+                    path: div.path.clone(),
+                    split: div.split,
+                    origin: div.origin,
+                    span: div.span,
+                });
+                return;
+            }
+        }
+
         let layouts = self.tab_manager.active_layouts(size.width as f32, viewport_h);
 
         for layout in &layouts {
@@ -248,6 +299,7 @@ impl KoiState {
     fn handle_mouse_release(&mut self) {
         self.mouse_left_pressed = false;
         self.auto_scroll_delta = 0;
+        self.divider_drag = None;
         if let Some(pane) = self.tab_manager.active_pane() {
             use alacritty_terminal::term::TermMode;
             let term = pane.term.lock();
@@ -276,6 +328,9 @@ impl KoiState {
         if event.state != ElementState::Pressed {
             return false;
         }
+
+        // Any keypress cancels an in-progress divider drag.
+        self.divider_drag = None;
         self.needs_redraw = true;
 
         // Reset cursor blink so it's visible while typing
@@ -1022,6 +1077,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
             needs_redraw: true,
             scroll_accumulator: 0.0,
             auto_scroll_delta: 0,
+            divider_drag: None,
         });
 
         // Trigger initial draw
@@ -1110,6 +1166,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 s.needs_redraw = true;
                 s.auto_scroll_delta = 0;
                 s.mouse_left_pressed = false;
+                s.divider_drag = None;
                 log::info!("Pane {} exited with code {}", pane_id, code);
                 if s.tab_manager.close_pane_by_id(pane_id) {
                     event_loop.exit();
