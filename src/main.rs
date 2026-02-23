@@ -29,6 +29,21 @@ fn clipboard_paste() -> Option<String> {
     arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+/// Try to get an image from the clipboard, save it as a PNG temp file,
+/// and return the file path. Used as fallback when Cmd+V has no text.
+fn clipboard_paste_image() -> Option<String> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    let img = cb.get_image().ok()?;
+    let rgba = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned())?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    let path = format!("/tmp/koi-paste-{}.png", ts);
+    rgba.save(&path).ok()?;
+    Some(path)
+}
+
 fn clipboard_copy(text: &str) {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         let _ = cb.set_text(text.to_owned());
@@ -173,10 +188,7 @@ impl KoiState {
         let line = raw_line.clamp(0, rows.saturating_sub(1));
 
         let grid_col = col.saturating_sub(1);
-        let point = alacritty_terminal::index::Point::new(
-            alacritty_terminal::index::Line(line),
-            alacritty_terminal::index::Column(grid_col),
-        );
+        let viewport_line = line as usize;
         let side = if ((cx - layout_x) % cw) > cw / 2.0 {
             alacritty_terminal::index::Side::Right
         } else {
@@ -204,6 +216,16 @@ impl KoiState {
                     use alacritty_terminal::grid::Scroll;
                     term.scroll_display(Scroll::Delta(self.auto_scroll_delta));
                 }
+                // Convert viewport-relative point to grid coordinates
+                // (must be after scroll_display so display_offset is current).
+                let display_offset = term.grid().display_offset();
+                let point = alacritty_terminal::term::viewport_to_point(
+                    display_offset,
+                    alacritty_terminal::index::Point::new(
+                        viewport_line,
+                        alacritty_terminal::index::Column(grid_col),
+                    ),
+                );
                 if let Some(ref mut sel) = term.selection {
                     sel.update(point, side);
                 }
@@ -261,11 +283,7 @@ impl KoiState {
 
                 // Check mouse mode and either send SGR or start selection (single lock)
                 let grid_col = col.saturating_sub(1);
-                let grid_line = (line as i32).saturating_sub(1);
-                let point = alacritty_terminal::index::Point::new(
-                    alacritty_terminal::index::Line(grid_line),
-                    alacritty_terminal::index::Column(grid_col),
-                );
+                let viewport_line = (line as i32).saturating_sub(1) as usize;
                 let side = if ((cx - layout.x) % cw) > cw / 2.0 {
                     alacritty_terminal::index::Side::Right
                 } else {
@@ -283,6 +301,14 @@ impl KoiState {
                             format!("\x1b[<0;{};{}M", col, line).into_bytes(),
                         );
                     } else {
+                        let display_offset = term.grid().display_offset();
+                        let point = alacritty_terminal::term::viewport_to_point(
+                            display_offset,
+                            alacritty_terminal::index::Point::new(
+                                viewport_line,
+                                alacritty_terminal::index::Column(grid_col),
+                            ),
+                        );
                         term.selection = Some(alacritty_terminal::selection::Selection::new(
                             alacritty_terminal::selection::SelectionType::Simple,
                             point,
@@ -306,6 +332,12 @@ impl KoiState {
             let mode = term.mode();
             let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
             let sgr = mode.contains(TermMode::SGR_MOUSE);
+            // Auto-copy selection to clipboard on mouse release.
+            if let Some(text) = term.selection_to_string() {
+                if !text.is_empty() {
+                    clipboard_copy(&text);
+                }
+            }
             drop(term);
             if mouse_mode && sgr {
                 if let Some(hit) = self.mouse_hit() {
@@ -532,10 +564,11 @@ impl KoiState {
                     self.window.request_redraw();
                     return false;
                 }
-                // Cmd+V: Paste from clipboard
+                // Cmd+V: Paste from clipboard (text, or image as temp file path)
                 Key::Character(ref s) if s == "v" => {
                     if let Some(pane) = self.tab_manager.active_pane() {
-                        if let Some(text) = clipboard_paste() {
+                        let text = clipboard_paste().or_else(|| clipboard_paste_image());
+                        if let Some(text) = text {
                             use alacritty_terminal::term::TermMode;
                             let bracketed = pane.term.lock().mode()
                                 .contains(TermMode::BRACKETED_PASTE);
@@ -616,6 +649,7 @@ impl KoiState {
         let bytes: Option<Cow<'static, [u8]>> = match event.logical_key {
             Key::Named(NamedKey::Enter) => Some(Cow::Borrowed(b"\r")),
             Key::Named(NamedKey::Backspace) => Some(Cow::Borrowed(b"\x7f")),
+            Key::Named(NamedKey::Tab) if shift_pressed => Some(Cow::Borrowed(b"\x1b[Z")),
             Key::Named(NamedKey::Tab) => Some(Cow::Borrowed(b"\t")),
             Key::Named(NamedKey::Escape) => Some(Cow::Borrowed(b"\x1b")),
             Key::Named(NamedKey::ArrowUp) if has_modifier =>
@@ -1223,7 +1257,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
                                 .unwrap_or(1)
                         };
 
-                        let edge_line = if s.auto_scroll_delta < 0 { 0 } else { (rows - 1).max(0) };
+                        let edge_line = if s.auto_scroll_delta < 0 { 0usize } else { (rows - 1).max(0) as usize };
                         let cols = term.grid().columns();
                         let edge_col = if s.auto_scroll_delta < 0 { 0 } else { cols.saturating_sub(1) };
                         let edge_side = if s.auto_scroll_delta < 0 {
@@ -1231,9 +1265,13 @@ impl ApplicationHandler<KoiEvent> for Koi {
                         } else {
                             alacritty_terminal::index::Side::Right
                         };
-                        let point = alacritty_terminal::index::Point::new(
-                            alacritty_terminal::index::Line(edge_line),
-                            alacritty_terminal::index::Column(edge_col),
+                        let display_offset = term.grid().display_offset();
+                        let point = alacritty_terminal::term::viewport_to_point(
+                            display_offset,
+                            alacritty_terminal::index::Point::new(
+                                edge_line,
+                                alacritty_terminal::index::Column(edge_col),
+                            ),
                         );
                         if let Some(ref mut sel) = term.selection {
                             sel.update(point, edge_side);
