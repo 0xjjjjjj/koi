@@ -567,7 +567,7 @@ impl KoiState {
                 // Cmd+V: Paste from clipboard (text, or image as temp file path)
                 Key::Character(ref s) if s == "v" => {
                     if let Some(pane) = self.tab_manager.active_pane() {
-                        let text = clipboard_paste().or_else(|| clipboard_paste_image());
+                        let text = clipboard_paste().or_else(clipboard_paste_image);
                         if let Some(text) = text {
                             use alacritty_terminal::term::TermMode;
                             let bracketed = pane.term.lock().mode()
