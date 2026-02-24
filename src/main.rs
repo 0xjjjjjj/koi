@@ -80,6 +80,8 @@ struct KoiState {
     scroll_accumulator: f64,
     auto_scroll_delta: i32,
     divider_drag: Option<DividerDrag>,
+    last_click_time: std::time::Instant,
+    click_count: u8,
 }
 
 impl KoiState {
@@ -236,6 +238,15 @@ impl KoiState {
         self.mouse_left_pressed = true;
         self.needs_redraw = true;
 
+        // Track multi-click: double-click = word, triple-click = line.
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_click_time).as_millis() < 400 {
+            self.click_count = (self.click_count % 3) + 1;
+        } else {
+            self.click_count = 1;
+        }
+        self.last_click_time = now;
+
         let size = self.window.inner_size();
         let cw = self.renderer.cell_width();
         let ch = self.renderer.cell_height();
@@ -306,8 +317,13 @@ impl KoiState {
                                 alacritty_terminal::index::Column(grid_col),
                             ),
                         );
+                        let sel_type = match self.click_count {
+                            2 => alacritty_terminal::selection::SelectionType::Semantic,
+                            3 => alacritty_terminal::selection::SelectionType::Lines,
+                            _ => alacritty_terminal::selection::SelectionType::Simple,
+                        };
                         term.selection = Some(alacritty_terminal::selection::Selection::new(
-                            alacritty_terminal::selection::SelectionType::Simple,
+                            sel_type,
                             point,
                             side,
                         ));
@@ -1109,6 +1125,8 @@ impl ApplicationHandler<KoiEvent> for Koi {
             scroll_accumulator: 0.0,
             auto_scroll_delta: 0,
             divider_drag: None,
+            last_click_time: std::time::Instant::now(),
+            click_count: 0,
         });
 
         // Trigger initial draw
