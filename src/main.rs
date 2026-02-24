@@ -88,9 +88,8 @@ impl KoiState {
         let cw = self.renderer.cell_width();
         let ch = self.renderer.cell_height();
         let tab_bar_h = if self.tab_manager.count() > 1 { ch } else { 0.0 };
-        let scale = self.window.scale_factor() as f32;
-        let cx = self.cursor_pos.0 as f32 * scale;
-        let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+        let cx = self.cursor_pos.0 as f32;
+        let cy = self.cursor_pos.1 as f32 - tab_bar_h;
         let size = self.window.inner_size();
         let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
         let layouts = self.tab_manager.active_layouts(size.width as f32, viewport_h);
@@ -136,9 +135,8 @@ impl KoiState {
         let cw = self.renderer.cell_width();
         let ch = self.renderer.cell_height();
         let tab_bar_h = if self.tab_manager.count() > 1 { ch } else { 0.0 };
-        let scale = self.window.scale_factor() as f32;
-        let cx = self.cursor_pos.0 as f32 * scale;
-        let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+        let cx = self.cursor_pos.0 as f32;
+        let cy = self.cursor_pos.1 as f32 - tab_bar_h;
 
         // Handle divider drag — update ratio and resize panes.
         if let Some(ref drag) = self.divider_drag {
@@ -242,9 +240,8 @@ impl KoiState {
         let cw = self.renderer.cell_width();
         let ch = self.renderer.cell_height();
         let tab_bar_h = if self.tab_manager.count() > 1 { ch } else { 0.0 };
-        let scale = self.window.scale_factor() as f32;
-        let cx = self.cursor_pos.0 as f32 * scale;
-        let cy = self.cursor_pos.1 as f32 * scale - tab_bar_h;
+        let cx = self.cursor_pos.0 as f32;
+        let cy = self.cursor_pos.1 as f32 - tab_bar_h;
         let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
 
         // Check if cursor is on a divider (4px threshold).
