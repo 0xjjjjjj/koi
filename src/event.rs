@@ -1,11 +1,11 @@
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, Notify, WindowSize};
 use alacritty_terminal::event_loop::Msg;
 use winit::event_loop::EventLoopProxy;
 
 /// Custom event sent from terminal threads to the winit event loop.
-#[derive(Debug)]
 pub enum KoiEvent {
     /// Terminal content changed, needs redraw.
     Wakeup,
@@ -15,6 +15,23 @@ pub enum KoiEvent {
     ChildExit(usize, i32),
     /// Terminal bell.
     Bell,
+    /// OSC 52: remote app wants to set the local clipboard.
+    ClipboardStore(String),
+    /// OSC 52: remote app wants to read the local clipboard (pane_id, formatter).
+    ClipboardLoad(usize, Arc<dyn Fn(&str) -> String + Sync + Send + 'static>),
+}
+
+impl std::fmt::Debug for KoiEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Wakeup => write!(f, "Wakeup"),
+            Self::Title(t, id) => write!(f, "Title({t}, {id})"),
+            Self::ChildExit(id, code) => write!(f, "ChildExit({id}, {code})"),
+            Self::Bell => write!(f, "Bell"),
+            Self::ClipboardStore(text) => write!(f, "ClipboardStore({text})"),
+            Self::ClipboardLoad(id, _) => write!(f, "ClipboardLoad({id})"),
+        }
+    }
 }
 
 /// Bridges alacritty_terminal events to winit's event loop.
@@ -45,8 +62,11 @@ impl EventListener for EventProxy {
             TermEvent::Title(title) => KoiEvent::Title(title, self.pane_id),
             TermEvent::ChildExit(code) => KoiEvent::ChildExit(self.pane_id, code),
             TermEvent::Bell => KoiEvent::Bell,
+            // OSC 52: remote app sets local clipboard (e.g. vim yank over SSH).
+            TermEvent::ClipboardStore(_, text) => KoiEvent::ClipboardStore(text),
+            // OSC 52: remote app reads local clipboard.
+            TermEvent::ClipboardLoad(_, formatter) => KoiEvent::ClipboardLoad(self.pane_id, formatter),
             // Security: intentionally block these events.
-            // - ClipboardStore/Load: blocks OSC 52 clipboard exfiltration
             // - PtyWrite: blocks DECRQSS echo-back attacks
             // - ColorRequest: blocks terminal color information leaks
             _ => return,

@@ -44,6 +44,45 @@ fn clipboard_paste_image() -> Option<String> {
     Some(path)
 }
 
+/// Extract a URL from grid cells around a given column on a given line.
+fn extract_url_at<T: alacritty_terminal::event::EventListener>(
+    term: &alacritty_terminal::term::Term<T>,
+    point: alacritty_terminal::index::Point,
+) -> Option<String> {
+    use alacritty_terminal::grid::Dimensions;
+    let cols = term.grid().columns();
+    let line = point.line;
+
+    // Collect the full line text.
+    let mut text = String::new();
+    for col in 0..cols {
+        let cell = &term.grid()[line][alacritty_terminal::index::Column(col)];
+        text.push(cell.c);
+    }
+
+    // Find URL containing the clicked column.
+    let click_col = point.column.0;
+    let url_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%";
+    for prefix in &["https://", "http://"] {
+        let mut start = 0;
+        while let Some(pos) = text[start..].find(prefix) {
+            let abs_start = start + pos;
+            let end = text[abs_start..]
+                .find(|c: char| !url_chars.contains(c))
+                .map(|e| abs_start + e)
+                .unwrap_or(text.len());
+            // Trim trailing punctuation.
+            let trimmed = text[abs_start..end].trim_end_matches(|c| ".,;:!?)>".contains(c));
+            let abs_end = abs_start + trimmed.len();
+            if click_col >= abs_start && click_col < abs_end {
+                return Some(trimmed.to_string());
+            }
+            start = end;
+        }
+    }
+    None
+}
+
 fn clipboard_copy(text: &str) {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         let _ = cb.set_text(text.to_owned());
@@ -64,6 +103,48 @@ struct DividerDrag {
     span: f32,
 }
 
+/// Scan terminal grid (visible + scrollback) for all occurrences of `query`.
+/// Returns matches as (grid Line, start column) pairs, topmost first.
+fn search_grid<T: alacritty_terminal::event::EventListener>(
+    term: &alacritty_terminal::term::Term<T>,
+    query: &str,
+) -> Vec<(alacritty_terminal::index::Line, usize)> {
+    use alacritty_terminal::grid::Dimensions;
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let cols = term.grid().columns();
+    let topmost = term.topmost_line();
+    let bottommost = term.bottommost_line();
+    let mut results = Vec::new();
+    let mut line = topmost;
+    while line <= bottommost {
+        // Collect line text.
+        let mut text = String::with_capacity(cols);
+        for col in 0..cols {
+            text.push(term.grid()[line][alacritty_terminal::index::Column(col)].c);
+        }
+        let lower = text.to_lowercase();
+        let q = query.to_lowercase();
+        let mut start = 0;
+        while let Some(pos) = lower[start..].find(&q) {
+            results.push((line, start + pos));
+            start += pos + 1;
+        }
+        line += 1;
+    }
+    results
+}
+
+/// State for Cmd+F scrollback search.
+struct SearchState {
+    query: String,
+    /// Grid points of all match starts (line, column).
+    matches: Vec<(alacritty_terminal::index::Line, usize)>,
+    /// Index into matches for the current/focused match.
+    current: usize,
+}
+
 /// Initialized application state — only exists after `resumed()`.
 struct KoiState {
     window: Window,
@@ -82,6 +163,8 @@ struct KoiState {
     divider_drag: Option<DividerDrag>,
     last_click_time: std::time::Instant,
     click_count: u8,
+    bell_flash_until: Option<std::time::Instant>,
+    search: Option<SearchState>,
 }
 
 impl KoiState {
@@ -300,6 +383,25 @@ impl KoiState {
                 if let Some(pane) = self.tab_manager.active_pane() {
                     use alacritty_terminal::term::TermMode;
                     let mut term = pane.term.lock();
+
+                    // Cmd+click: open URL under cursor.
+                    if self.modifiers.super_key() {
+                        let display_offset = term.grid().display_offset();
+                        let point = alacritty_terminal::term::viewport_to_point(
+                            display_offset,
+                            alacritty_terminal::index::Point::new(
+                                viewport_line,
+                                alacritty_terminal::index::Column(grid_col),
+                            ),
+                        );
+                        if let Some(url) = extract_url_at(&*term, point) {
+                            drop(term);
+                            let _ = std::process::Command::new("open").arg(&url).spawn();
+                            self.window.request_redraw();
+                            return;
+                        }
+                    }
+
                     let mode = term.mode();
                     let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
                     let sgr = mode.contains(TermMode::SGR_MOUSE);
@@ -385,6 +487,118 @@ impl KoiState {
         let shift_pressed = self.modifiers.shift_key();
         let ctrl_pressed = self.modifiers.control_key();
         let alt_pressed = self.modifiers.alt_key();
+
+        // --- Search mode input handling ---
+        if self.search.is_some() {
+            match event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.search = None;
+                    self.window.request_redraw();
+                    return false;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    // Enter: next match. Shift+Enter: previous match.
+                    if let Some(ref mut search) = self.search {
+                        if !search.matches.is_empty() {
+                            if shift_pressed {
+                                search.current = search.current.checked_sub(1)
+                                    .unwrap_or(search.matches.len() - 1);
+                            } else {
+                                search.current = (search.current + 1) % search.matches.len();
+                            }
+                            // Scroll to make the current match visible.
+                            let (match_line, _) = search.matches[search.current];
+                            if let Some(pane) = self.tab_manager.active_pane() {
+                                use alacritty_terminal::grid::{Dimensions, Scroll};
+                                let mut term = pane.term.lock();
+                                let screen_lines = term.screen_lines() as i32;
+                                let target_offset = -(match_line.0) - screen_lines / 2;
+                                let target_offset = target_offset.max(0) as usize;
+                                let current_offset = term.grid().display_offset();
+                                let delta = target_offset as i32 - current_offset as i32;
+                                if delta != 0 {
+                                    term.scroll_display(Scroll::Delta(delta));
+                                }
+                            }
+                        }
+                    }
+                    self.window.request_redraw();
+                    return false;
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    if let Some(ref mut search) = self.search {
+                        search.query.pop();
+                        // Re-search.
+                        if let Some(pane) = self.tab_manager.active_pane() {
+                            let term = pane.term.lock();
+                            search.matches = search_grid(&*term, &search.query);
+                            search.current = 0;
+                        }
+                    }
+                    self.window.request_redraw();
+                    return false;
+                }
+                // Cmd+G: next match, Cmd+Shift+G: previous match.
+                Key::Character(ref s) if super_pressed && (s == "g" || s == "G") => {
+                    if let Some(ref mut search) = self.search {
+                        if !search.matches.is_empty() {
+                            if shift_pressed {
+                                search.current = search.current.checked_sub(1)
+                                    .unwrap_or(search.matches.len() - 1);
+                            } else {
+                                search.current = (search.current + 1) % search.matches.len();
+                            }
+                            let (match_line, _) = search.matches[search.current];
+                            if let Some(pane) = self.tab_manager.active_pane() {
+                                use alacritty_terminal::grid::{Dimensions, Scroll};
+                                let mut term = pane.term.lock();
+                                let screen_lines = term.screen_lines() as i32;
+                                let target_offset = -(match_line.0) - screen_lines / 2;
+                                let target_offset = target_offset.max(0) as usize;
+                                let current_offset = term.grid().display_offset();
+                                let delta = target_offset as i32 - current_offset as i32;
+                                if delta != 0 {
+                                    term.scroll_display(Scroll::Delta(delta));
+                                }
+                            }
+                        }
+                    }
+                    self.window.request_redraw();
+                    return false;
+                }
+                Key::Character(ref s) if !super_pressed && !ctrl_pressed => {
+                    if let Some(ref mut search) = self.search {
+                        search.query.push_str(s);
+                        // Re-search.
+                        if let Some(pane) = self.tab_manager.active_pane() {
+                            let term = pane.term.lock();
+                            search.matches = search_grid(&*term, &search.query);
+                            search.current = 0;
+                            // Scroll to first match.
+                            if let Some(&(match_line, _)) = search.matches.first() {
+                                use alacritty_terminal::grid::{Dimensions, Scroll};
+                                let screen_lines = term.screen_lines() as i32;
+                                let target_offset = -(match_line.0) - screen_lines / 2;
+                                let target_offset = target_offset.max(0) as usize;
+                                let current_offset = term.grid().display_offset();
+                                let delta = target_offset as i32 - current_offset as i32;
+                                if delta != 0 {
+                                    drop(term);
+                                    let pane = self.tab_manager.active_pane().unwrap();
+                                    pane.term.lock().scroll_display(Scroll::Delta(delta));
+                                }
+                            }
+                        }
+                    }
+                    self.window.request_redraw();
+                    return false;
+                }
+                _ => {
+                    self.window.request_redraw();
+                    return false;
+                }
+            }
+        }
 
         // Ctrl+Tab / Ctrl+Shift+Tab: Cycle tabs
         if ctrl_pressed && matches!(event.logical_key, Key::Named(NamedKey::Tab)) {
@@ -574,6 +788,16 @@ impl KoiState {
                         }
                         term.selection = None;
                     }
+                    self.window.request_redraw();
+                    return false;
+                }
+                // Cmd+F: Search scrollback
+                Key::Character(ref s) if s == "f" => {
+                    self.search = Some(SearchState {
+                        query: String::new(),
+                        matches: Vec::new(),
+                        current: 0,
+                    });
                     self.window.request_redraw();
                     return false;
                 }
@@ -878,9 +1102,20 @@ impl KoiState {
         let w = size.width as f32;
         let h = size.height as f32;
 
+        let bell_active = self.bell_flash_until
+            .map(|t| std::time::Instant::now() < t)
+            .unwrap_or(false);
+        if !bell_active {
+            self.bell_flash_until = None;
+        }
+
         unsafe {
             gl::Viewport(0, 0, size.width as i32, size.height as i32);
-            gl::ClearColor(0.937, 0.945, 0.961, 1.0);
+            if bell_active {
+                gl::ClearColor(1.0, 0.85, 0.6, 1.0); // warm flash
+            } else {
+                gl::ClearColor(0.937, 0.945, 0.961, 1.0);
+            }
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
 
@@ -916,6 +1151,25 @@ impl KoiState {
                         show_cursor,
                     );
                     drop(term);
+                }
+            }
+
+            // Draw scroll position indicator when scrolled up.
+            for layout in &layouts {
+                if let Some(pane) = tab.panes.get(&layout.pane_id) {
+                    let term = pane.term.lock();
+                    let offset = term.grid().display_offset();
+                    if offset > 0 {
+                        use alacritty_terminal::grid::Dimensions;
+                        let total = term.grid().history_size();
+                        let label = format!(" [{}/{}] ", offset, total);
+                        let label_w = label.len() as f32 * self.renderer.cell_width();
+                        let lx = layout.x + layout.width - label_w;
+                        let ly = layout.y + tab_bar_height;
+                        let fg = [1.0, 1.0, 1.0, 1.0];
+                        let bg = [0.122, 0.471, 0.706, 0.9];
+                        self.renderer.draw_string(lx, ly, &label, fg, bg);
+                    }
                 }
             }
 
@@ -960,6 +1214,68 @@ impl KoiState {
                     );
                 }
             }
+        }
+
+        // Draw search bar and match highlights.
+        if let Some(ref search) = self.search {
+            let ch = self.renderer.cell_height();
+            let cw = self.renderer.cell_width();
+
+            // Highlight matches in the visible viewport.
+            if let Some(pane) = self.tab_manager.active_pane() {
+                let term = pane.term.lock();
+                let display_offset = term.grid().display_offset() as i32;
+                use alacritty_terminal::grid::Dimensions;
+                let screen_lines = term.screen_lines() as i32;
+                let viewport_top = -display_offset;
+                let viewport_bottom = viewport_top + screen_lines - 1;
+
+                // Find the active pane layout for positioning.
+                let layouts = self.tab_manager.active_layouts(w, (h - tab_bar_height).max(0.0));
+                let active_id = self.tab_manager.active_tab()
+                    .map(|t| t.pane_tree.active_pane_id());
+                let layout = active_id.and_then(|id| layouts.iter().find(|l| l.pane_id == id));
+
+                if let Some(layout) = layout {
+                    let qlen = search.query.len();
+                    for (i, &(line, col)) in search.matches.iter().enumerate() {
+                        if line.0 >= viewport_top && line.0 <= viewport_bottom {
+                            let vy = (line.0 - viewport_top) as f32;
+                            let is_current = i == search.current;
+                            let color = if is_current {
+                                [1.0, 0.6, 0.0, 0.5] // orange for current
+                            } else {
+                                [1.0, 0.9, 0.0, 0.3] // yellow for others
+                            };
+                            for j in 0..qlen {
+                                self.renderer.draw_rect(
+                                    layout.x + (col + j) as f32 * cw,
+                                    layout.y + tab_bar_height + vy * ch,
+                                    cw,
+                                    ch,
+                                    color,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Search bar at the bottom.
+            let bar_y = h - ch;
+            let bar_bg = [0.2, 0.2, 0.2, 0.95];
+            let bar_fg = [1.0, 1.0, 1.0, 1.0];
+            self.renderer.draw_rect(0.0, bar_y, w, ch, bar_bg);
+            let count_str = if search.matches.is_empty() {
+                if search.query.is_empty() {
+                    "Search: ".to_string()
+                } else {
+                    format!("Search: {} (no matches)", search.query)
+                }
+            } else {
+                format!("Search: {} ({}/{})", search.query, search.current + 1, search.matches.len())
+            };
+            self.renderer.draw_string(8.0, bar_y, &count_str, bar_fg, bar_bg);
         }
 
         self.renderer.flush(w, h);
@@ -1127,6 +1443,8 @@ impl ApplicationHandler<KoiEvent> for Koi {
             divider_drag: None,
             last_click_time: std::time::Instant::now(),
             click_count: 0,
+            bell_flash_until: None,
+            search: None,
         });
 
         // Trigger initial draw
@@ -1236,6 +1554,21 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     extern "C" { fn NSBeep(); }
                     unsafe { NSBeep(); }
                 }
+                s.bell_flash_until = Some(std::time::Instant::now()
+                    + std::time::Duration::from_millis(150));
+                s.needs_redraw = true;
+                s.window.request_redraw();
+            }
+            KoiEvent::ClipboardStore(text) => {
+                clipboard_copy(&text);
+            }
+            KoiEvent::ClipboardLoad(_pane_id, formatter) => {
+                if let Some(text) = clipboard_paste() {
+                    let response = formatter(&text);
+                    if let Some(pane) = s.tab_manager.active_pane() {
+                        pane.notifier.send_bytes(response.into_bytes());
+                    }
+                }
             }
         }
     }
@@ -1301,6 +1634,15 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     std::time::Instant::now() + std::time::Duration::from_millis(50),
                 ));
                 return;
+            }
+
+            // Expire bell flash and trigger a redraw to clear it.
+            if let Some(until) = s.bell_flash_until {
+                if std::time::Instant::now() >= until {
+                    s.bell_flash_until = None;
+                    s.needs_redraw = true;
+                    s.window.request_redraw();
+                }
             }
 
             // Only redraw when cursor blink phase actually changes.
