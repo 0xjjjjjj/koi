@@ -145,6 +145,33 @@ struct SearchState {
     current: usize,
 }
 
+/// State for tab-switch slide animation.
+struct TabAnimation {
+    start: std::time::Instant,
+    /// -1.0 = slide from left, +1.0 = slide from right
+    direction: f32,
+}
+
+impl TabAnimation {
+    const DURATION_MS: f32 = 180.0;
+
+    fn progress(&self) -> f32 {
+        let elapsed = self.start.elapsed().as_secs_f32() * 1000.0;
+        (elapsed / Self::DURATION_MS).min(1.0)
+    }
+
+    /// Ease-out cubic for smooth deceleration.
+    fn offset_fraction(&self) -> f32 {
+        let t = self.progress();
+        let ease = 1.0 - (1.0 - t).powi(3);
+        self.direction * (1.0 - ease)
+    }
+
+    fn done(&self) -> bool {
+        self.progress() >= 1.0
+    }
+}
+
 /// Initialized application state — only exists after `resumed()`.
 struct KoiState {
     window: Window,
@@ -165,6 +192,7 @@ struct KoiState {
     click_count: u8,
     bell_flash_until: Option<std::time::Instant>,
     search: Option<SearchState>,
+    tab_animation: Option<TabAnimation>,
 }
 
 impl KoiState {
@@ -197,7 +225,8 @@ impl KoiState {
     }
 
     fn rebuild_renderer(&mut self, font_size: f32, scale: f32) {
-        self.renderer = Renderer::new("IBM Plex Mono", font_size, scale);
+        let theme = self.renderer.theme.clone();
+        self.renderer = Renderer::with_theme("IBM Plex Mono", font_size, scale, theme);
         let cw = self.renderer.cell_width();
         let ch = self.renderer.cell_height();
         let size = self.window.inner_size();
@@ -603,12 +632,45 @@ impl KoiState {
         // Ctrl+Tab / Ctrl+Shift+Tab: Cycle tabs
         if ctrl_pressed && matches!(event.logical_key, Key::Named(NamedKey::Tab)) {
             if shift_pressed {
+                self.tab_animation = Some(TabAnimation {
+                    start: std::time::Instant::now(),
+                    direction: -1.0,
+                });
                 self.tab_manager.prev_tab();
             } else {
+                self.tab_animation = Some(TabAnimation {
+                    start: std::time::Instant::now(),
+                    direction: 1.0,
+                });
                 self.tab_manager.next_tab();
             }
             self.window.request_redraw();
             return false;
+        }
+
+        // Cmd+Left/Right: Cycle tabs (iTerm2-style) with slide animation
+        if super_pressed && !alt_pressed {
+            match event.logical_key {
+                Key::Named(NamedKey::ArrowLeft) if !shift_pressed => {
+                    self.tab_animation = Some(TabAnimation {
+                        start: std::time::Instant::now(),
+                        direction: -1.0,
+                    });
+                    self.tab_manager.prev_tab();
+                    self.window.request_redraw();
+                    return false;
+                }
+                Key::Named(NamedKey::ArrowRight) if !shift_pressed => {
+                    self.tab_animation = Some(TabAnimation {
+                        start: std::time::Instant::now(),
+                        direction: 1.0,
+                    });
+                    self.tab_manager.next_tab();
+                    self.window.request_redraw();
+                    return false;
+                }
+                _ => {}
+            }
         }
 
         // Cmd+Option+Arrow: Directional pane navigation
@@ -674,6 +736,16 @@ impl KoiState {
         // Handle tab keybindings (Cmd+...)
         if super_pressed {
             match event.logical_key {
+                // Cmd+Shift+T: Toggle dark/light theme
+                Key::Character(ref s) if (s == "T" || (s == "t" && shift_pressed)) => {
+                    use renderer::Theme;
+                    // Toggle: if current bg is dark (mocha), switch to latte, else mocha.
+                    let is_dark = self.renderer.theme.bg[0] < 0.5;
+                    self.renderer.theme = if is_dark { Theme::latte() } else { Theme::mocha() };
+                    self.needs_redraw = true;
+                    self.window.request_redraw();
+                    return false;
+                }
                 // Cmd+T: New tab
                 Key::Character(ref s) if s == "t" => {
                     let (cols, rows) = self.grid_size();
@@ -707,12 +779,20 @@ impl KoiState {
                 }
                 // Cmd+Shift+[ : Previous tab
                 Key::Character(ref s) if s == "{" && shift_pressed => {
+                    self.tab_animation = Some(TabAnimation {
+                        start: std::time::Instant::now(),
+                        direction: -1.0,
+                    });
                     self.tab_manager.prev_tab();
                     self.window.request_redraw();
                     return false;
                 }
                 // Cmd+Shift+] : Next tab
                 Key::Character(ref s) if s == "}" && shift_pressed => {
+                    self.tab_animation = Some(TabAnimation {
+                        start: std::time::Instant::now(),
+                        direction: 1.0,
+                    });
                     self.tab_manager.next_tab();
                     self.window.request_redraw();
                     return false;
@@ -1112,9 +1192,17 @@ impl KoiState {
         unsafe {
             gl::Viewport(0, 0, size.width as i32, size.height as i32);
             if bell_active {
-                gl::ClearColor(1.0, 0.85, 0.6, 1.0); // warm flash
+                // Bell flash: blend theme bg with warm orange tint
+                let bg = &self.renderer.theme.bg;
+                gl::ClearColor(
+                    (bg[0] + 1.0) / 2.0,
+                    (bg[1] + 0.85) / 2.0,
+                    (bg[2] + 0.6) / 2.0,
+                    1.0,
+                );
             } else {
-                gl::ClearColor(0.937, 0.945, 0.961, 1.0);
+                let bg = &self.renderer.theme.bg;
+                gl::ClearColor(bg[0], bg[1], bg[2], 1.0);
             }
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
@@ -1133,6 +1221,20 @@ impl KoiState {
         // Render all panes in the active tab
         let viewport_h = (h - tab_bar_height).max(0.0);
         let layouts = self.tab_manager.active_layouts(w, viewport_h);
+
+        // Tab switch slide animation offset
+        let anim_done = self.tab_animation.as_ref().map(|a| a.done()).unwrap_or(true);
+        let anim_x_offset = if anim_done {
+            self.tab_animation = None;
+            0.0
+        } else {
+            let offset = self.tab_animation.as_ref().unwrap().offset_fraction() * w;
+            // Keep requesting redraws during animation
+            self.needs_redraw = true;
+            self.window.request_redraw();
+            offset
+        };
+
         if let Some(tab) = self.tab_manager.active_tab() {
             let active_pane_id = tab.pane_tree.active_pane_id();
 
@@ -1146,7 +1248,7 @@ impl KoiState {
                     let term = pane.term.lock();
                     self.renderer.draw_grid(
                         &*term,
-                        layout.x,
+                        layout.x + anim_x_offset,
                         layout.y + tab_bar_height,
                         show_cursor,
                     );
@@ -1166,16 +1268,22 @@ impl KoiState {
                         let label_w = label.len() as f32 * self.renderer.cell_width();
                         let lx = layout.x + layout.width - label_w;
                         let ly = layout.y + tab_bar_height;
-                        let fg = [1.0, 1.0, 1.0, 1.0];
-                        let bg = [0.122, 0.471, 0.706, 0.9];
-                        self.renderer.draw_string(lx, ly, &label, fg, bg);
+                        let badge_bg = [
+                            self.renderer.theme.border[0],
+                            self.renderer.theme.border[1],
+                            self.renderer.theme.border[2],
+                            0.9,
+                        ];
+                        let badge_fg = [1.0, 1.0, 1.0, 1.0];
+                        self.renderer.draw_string(lx, ly, &label, badge_fg, badge_bg);
                     }
                 }
             }
 
             // Draw pane dividers (2px lines between panes)
             if layouts.len() > 1 {
-                let divider_color = [0.725, 0.745, 0.792, 1.0]; // Latte overlay0
+                let o = &self.renderer.theme.overlay0;
+                let divider_color = [o[0], o[1], o[2], 1.0];
                 for layout in &layouts {
                     // Right edge divider
                     if layout.x + layout.width < w - 1.0 {
@@ -1203,7 +1311,7 @@ impl KoiState {
                 if let Some(active_layout) =
                     layouts.iter().find(|l| l.pane_id == active_pane_id)
                 {
-                    let border_color = [0.122, 0.471, 0.706, 1.0];
+                    let border_color = self.renderer.theme.border;
                     self.renderer.draw_pane_border(
                         active_layout.x,
                         active_layout.y + tab_bar_height,
@@ -1263,8 +1371,9 @@ impl KoiState {
 
             // Search bar at the bottom.
             let bar_y = h - ch;
-            let bar_bg = [0.2, 0.2, 0.2, 0.95];
-            let bar_fg = [1.0, 1.0, 1.0, 1.0];
+            let s0 = &self.renderer.theme.surface0;
+            let bar_bg = [s0[0], s0[1], s0[2], 0.95];
+            let bar_fg = self.renderer.theme.fg4();
             self.renderer.draw_rect(0.0, bar_y, w, ch, bar_bg);
             let count_str = if search.matches.is_empty() {
                 if search.query.is_empty() {
@@ -1445,6 +1554,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
             click_count: 0,
             bell_flash_until: None,
             search: None,
+            tab_animation: None,
         });
 
         // Trigger initial draw
