@@ -442,6 +442,20 @@ impl Renderer {
         let tex_id = self.glyph_cache.atlas_tex_id();
         self.text_renderer.flush(tex_id, width, height);
     }
+
+    /// Flush with alpha blending enabled for rects too (for overlays).
+    pub fn flush_blended(&mut self, width: f32, height: f32) {
+        unsafe {
+            crate::gl::Enable(crate::gl::BLEND);
+            crate::gl::BlendFunc(crate::gl::SRC_ALPHA, crate::gl::ONE_MINUS_SRC_ALPHA);
+        }
+        self.rect_renderer.flush(width, height);
+        let tex_id = self.glyph_cache.atlas_tex_id();
+        self.text_renderer.flush(tex_id, width, height);
+        unsafe {
+            crate::gl::Disable(crate::gl::BLEND);
+        }
+    }
 }
 
 /// Map a single 6-level color-cube axis value (0-5) to its xterm byte value.

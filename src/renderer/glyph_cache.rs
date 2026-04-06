@@ -103,6 +103,15 @@ impl GlyphCache {
         self.atlas.tex_id()
     }
 
+    /// Recreate the atlas texture and clear the glyph cache.
+    /// Call this after GPU context loss (e.g. macOS sleep/wake) to force
+    /// all glyphs to be re-rasterized and re-uploaded.
+    pub fn invalidate(&mut self) {
+        log::info!("Glyph atlas invalidated — rebuilding texture");
+        self.atlas.regrow(self.atlas.width());
+        self.cache.clear();
+    }
+
     /// Regrow the atlas if it filled up during the previous frame.
     /// Must be called before any draw calls to avoid mid-batch texture swaps.
     pub fn try_regrow(&mut self) {

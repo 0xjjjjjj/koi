@@ -193,6 +193,8 @@ struct KoiState {
     bell_flash_until: Option<std::time::Instant>,
     search: Option<SearchState>,
     tab_animation: Option<TabAnimation>,
+    show_about: bool,
+    about_opened_at: Option<std::time::Instant>,
 }
 
 impl KoiState {
@@ -350,6 +352,14 @@ impl KoiState {
         self.mouse_left_pressed = true;
         self.needs_redraw = true;
 
+        // Dismiss about overlay on click
+        if self.show_about {
+            self.show_about = false;
+            self.about_opened_at = None;
+            self.window.request_redraw();
+            return;
+        }
+
         // Track multi-click: double-click = word, triple-click = line.
         let now = std::time::Instant::now();
         if now.duration_since(self.last_click_time).as_millis() < 400 {
@@ -493,6 +503,48 @@ impl KoiState {
         }
     }
 
+    /// Handle right-click (button=2) and middle-click (button=1).
+    /// In mouse mode: forward SGR events to the PTY (tmux, vim, etc.).
+    /// Outside mouse mode: right-click pastes, middle-click pastes.
+    fn handle_other_mouse_button(&mut self, button: u8, state: ElementState) {
+        if let Some(pane) = self.tab_manager.active_pane() {
+            use alacritty_terminal::term::TermMode;
+            let term = pane.term.lock();
+            let mouse_mode = term.mode().intersects(TermMode::MOUSE_MODE);
+            let sgr = term.mode().contains(TermMode::SGR_MOUSE);
+            drop(term);
+
+            if mouse_mode && sgr {
+                if let Some(hit) = self.mouse_hit() {
+                    let suffix = if state == ElementState::Pressed { 'M' } else { 'm' };
+                    pane.notifier.send_bytes(
+                        format!("\x1b[<{};{};{}{}", button, hit.col, hit.line, suffix)
+                            .into_bytes(),
+                    );
+                }
+            } else if state == ElementState::Pressed {
+                // Outside mouse mode: paste on right-click or middle-click
+                if let Some(text) = clipboard_paste() {
+                    use alacritty_terminal::term::TermMode;
+                    let bracketed = pane.term.lock().mode()
+                        .contains(TermMode::BRACKETED_PASTE);
+                    if bracketed {
+                        let sanitized = text
+                            .replace("\x1b[200~", "")
+                            .replace("\x1b[201~", "");
+                        let mut bytes = Vec::new();
+                        bytes.extend_from_slice(b"\x1b[200~");
+                        bytes.extend_from_slice(sanitized.as_bytes());
+                        bytes.extend_from_slice(b"\x1b[201~");
+                        pane.notifier.send_input(&bytes);
+                    } else {
+                        pane.notifier.send_input(text.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle keyboard input. Returns `true` if the application should exit.
     fn handle_keyboard(
         &mut self,
@@ -516,6 +568,14 @@ impl KoiState {
         let shift_pressed = self.modifiers.shift_key();
         let ctrl_pressed = self.modifiers.control_key();
         let alt_pressed = self.modifiers.alt_key();
+
+        // --- About overlay: any key dismisses ---
+        if self.show_about {
+            self.show_about = false;
+            self.about_opened_at = None;
+            self.window.request_redraw();
+            return false;
+        }
 
         // --- Search mode input handling ---
         if self.search.is_some() {
@@ -904,6 +964,17 @@ impl KoiState {
                             }
                         }
                     }
+                    return false;
+                }
+                // Cmd+,: About overlay
+                Key::Character(ref s) if s == "," => {
+                    self.show_about = !self.show_about;
+                    if self.show_about {
+                        self.about_opened_at = Some(std::time::Instant::now());
+                    } else {
+                        self.about_opened_at = None;
+                    }
+                    self.window.request_redraw();
                     return false;
                 }
                 // Cmd+Q: Quit
@@ -1387,7 +1458,133 @@ impl KoiState {
             self.renderer.draw_string(8.0, bar_y, &count_str, bar_fg, bar_bg);
         }
 
-        self.renderer.flush(w, h);
+        // --- About overlay ---
+        if self.show_about {
+            // Flush terminal content first so overlay draws on top.
+            self.renderer.flush(w, h);
+
+            let alpha = self.about_opened_at
+                .map(|t| (t.elapsed().as_millis() as f32 / 150.0).min(1.0))
+                .unwrap_or(1.0);
+
+            if alpha < 1.0 {
+                self.needs_redraw = true;
+                self.window.request_redraw();
+            }
+
+            // Scrim
+            self.renderer.draw_rect(0.0, 0.0, w, h, [0.0, 0.0, 0.0, 0.55 * alpha]);
+
+            let cw = self.renderer.cell_width();
+            let ch = self.renderer.cell_height();
+
+            // Card dimensions
+            let card_cols = 44;
+            let card_rows = 24;
+            let card_w = card_cols as f32 * cw;
+            let card_h = card_rows as f32 * ch;
+            let card_x = (w - card_w) / 2.0;
+            let card_y = (h - card_h) / 2.0;
+
+            // Card background with subtle border
+            let bg = self.renderer.theme.bg4();
+            let card_bg = [bg[0], bg[1], bg[2], 0.97 * alpha];
+            self.renderer.draw_rect(card_x, card_y, card_w, card_h, card_bg);
+
+            // Accent border (1px)
+            let accent = self.renderer.theme.border;
+            let border_c = [accent[0], accent[1], accent[2], 0.6 * alpha];
+            self.renderer.draw_pane_border(card_x, card_y, card_w, card_h, 1.0, border_c);
+
+            // --- Pixel-art koi fish (12x7 grid) ---
+            // Each pixel is 2x2 cells for visibility
+            let px = 2.0; // cells per pixel
+            let fish_w_cells = 12.0 * px;
+            let fish_h_cells = 7.0 * px;
+            let fish_x = card_x + (card_w - fish_w_cells * cw) / 2.0;
+            let fish_y = card_y + ch * 2.0;
+
+            // Color palette indices:
+            // 0 = transparent, 1 = body (orange/red), 2 = white patch,
+            // 3 = dark accent (fin/tail), 4 = eye, 5 = whisker
+            let body: [f32; 4]    = [0.93, 0.42, 0.20, alpha]; // warm orange
+            let white: [f32; 4]   = [0.96, 0.96, 0.94, alpha]; // koi white
+            let dark: [f32; 4]    = [0.72, 0.25, 0.12, alpha]; // deep red-brown
+            let eye: [f32; 4]     = [0.12, 0.12, 0.14, alpha]; // near-black
+            let whisker: [f32; 4] = [0.55, 0.55, 0.52, alpha]; // subtle gray
+
+            // 12 columns x 7 rows koi fish facing left
+            let fish: [[u8; 12]; 7] = [
+                [0,0,0,0,0,3,1,1,1,3,0,0],
+                [0,5,0,0,3,1,2,2,1,1,3,0],
+                [0,0,0,3,1,2,2,1,1,1,1,3],
+                [0,0,4,1,1,1,2,1,1,3,1,3],
+                [0,0,0,3,1,1,1,1,1,1,1,3],
+                [0,0,0,0,3,1,1,2,1,1,3,0],
+                [0,0,0,0,0,3,1,1,1,3,0,0],
+            ];
+            let palette: [Option<[f32; 4]>; 6] = [
+                None, Some(body), Some(white), Some(dark), Some(eye), Some(whisker),
+            ];
+
+            for (row, line) in fish.iter().enumerate() {
+                for (col, &pixel) in line.iter().enumerate() {
+                    if let Some(color) = palette[pixel as usize] {
+                        let rx = fish_x + col as f32 * px * cw;
+                        let ry = fish_y + row as f32 * px * ch;
+                        self.renderer.draw_rect(rx, ry, px * cw, px * ch, color);
+                    }
+                }
+            }
+
+            // --- Text below the fish ---
+            let fg = self.renderer.theme.fg4();
+            let fg_a = [fg[0], fg[1], fg[2], alpha];
+            let dim = [fg[0], fg[1], fg[2], 0.5 * alpha];
+            let clear = [0.0, 0.0, 0.0, 0.0]; // transparent bg for text
+
+            let text_x = card_x + cw * 2.0;
+            let mut row = card_y + fish_h_cells + ch * 4.0;
+
+            // Title + version
+            let version_line = format!("Koi v{}", env!("CARGO_PKG_VERSION"));
+            let title_x = card_x + (card_w - version_line.len() as f32 * cw) / 2.0;
+            self.renderer.draw_string(title_x, row, &version_line, fg_a, clear);
+            row += ch * 1.5;
+
+            // Tagline
+            let tagline = "GPU-accelerated terminal emulator";
+            let tag_x = card_x + (card_w - tagline.len() as f32 * cw) / 2.0;
+            self.renderer.draw_string(tag_x, row, tagline, dim, clear);
+            row += ch * 2.5;
+
+            // Shortcuts in two columns
+            let shortcuts: &[(&str, &str)] = &[
+                ("Cmd+T",         "New tab"),
+                ("Cmd+D / +Shift+D", "Split V / H"),
+                ("Cmd+W",         "Close pane"),
+                ("Cmd+F",         "Search"),
+                ("Cmd+Shift+T",   "Dark / light"),
+                ("Cmd+=/-/0",     "Zoom"),
+            ];
+
+            for (key, desc) in shortcuts {
+                let line = format!("  {:22}{}", key, desc);
+                self.renderer.draw_string(text_x, row, &line, dim, clear);
+                row += ch;
+            }
+
+            row += ch;
+            let dismiss = "Press any key to close";
+            let dx = card_x + (card_w - dismiss.len() as f32 * cw) / 2.0;
+            self.renderer.draw_string(dx, row, dismiss, dim, clear);
+
+            // Flush overlay with alpha blending for scrim/card transparency.
+            self.renderer.flush_blended(w, h);
+        } else {
+            self.renderer.flush(w, h);
+        }
+
         if let Err(e) = self.gl_surface.swap_buffers(&self.gl_context) {
             log::error!("swap_buffers failed: {}", e);
         }
@@ -1413,10 +1610,16 @@ impl Koi {
 }
 
 impl ApplicationHandler<KoiEvent> for Koi {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        // On macOS sleep/wake, GPU textures can be purged from VRAM.
+        // Invalidate the glyph atlas so all glyphs are re-uploaded.
+        if let Some(ref mut s) = self.state {
+            s.renderer.glyph_cache.invalidate();
+            s.needs_redraw = true;
+            s.window.request_redraw();
             return;
         }
+        let event_loop = _event_loop;
 
         let window_attrs = WindowAttributes::default()
             .with_title("Koi")
@@ -1555,6 +1758,8 @@ impl ApplicationHandler<KoiEvent> for Koi {
             bell_flash_until: None,
             search: None,
             tab_animation: None,
+            show_about: false,
+            about_opened_at: None,
         });
 
         // Trigger initial draw
@@ -1593,6 +1798,20 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 ..
             } => {
                 s.handle_mouse_release();
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Right,
+                ..
+            } => {
+                s.handle_other_mouse_button(2, state);
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                s.handle_other_mouse_button(1, state);
             }
             WindowEvent::Resized(new_size) => {
                 s.handle_resize(new_size);
