@@ -171,8 +171,9 @@ impl Renderer {
             // Glyph (tab bar: always regular weight)
             let glyph = self.glyph_cache.get_glyph(c, false, false);
             if glyph.width > 0.0 {
-                let gx = cell_x + glyph.left;
-                let gy = cell_y + ch + descent - glyph.top;
+                // Snap to pixel grid to avoid bilinear filtering blur.
+                let gx = (cell_x + glyph.left).round();
+                let gy = (cell_y + ch + descent - glyph.top).round();
 
                 self.text_renderer.add(GlyphInstance {
                     x: gx,
@@ -320,8 +321,8 @@ impl Renderer {
                 cell.flags.contains(Flags::ITALIC),
             );
             if glyph.width > 0.0 {
-                let gx = cell_x + glyph.left;
-                let gy = cell_y + ch + descent - glyph.top;
+                let gx = (cell_x + glyph.left).round();
+                let gy = (cell_y + ch + descent - glyph.top).round();
 
                 self.text_renderer.add(GlyphInstance {
                     x: gx,
