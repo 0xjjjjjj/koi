@@ -1189,7 +1189,6 @@ impl KoiState {
         };
         if scroll_lines != 0 {
             if let Some(pane) = self.tab_manager.active_pane() {
-                // Mouse reporting: send scroll as button 64/65 if app wants it
                 use alacritty_terminal::term::TermMode;
                 let term = pane.term.lock();
                 let mode = term.mode();
@@ -1198,7 +1197,11 @@ impl KoiState {
                 let alt_screen = mode.contains(TermMode::ALT_SCREEN);
                 drop(term);
 
-                if mouse_mode && sgr {
+                // Default: scroll terminal scrollback history.
+                // Shift+Scroll: forward to the app (for vim, less, etc.).
+                let shift = self.modifiers.shift_key();
+
+                if shift && mouse_mode && sgr {
                     if let Some(hit) = self.mouse_hit() {
                         let button = if scroll_lines > 0 { 64 } else { 65 };
                         let count = scroll_lines.unsigned_abs();
@@ -1209,9 +1212,8 @@ impl KoiState {
                             );
                         }
                     }
-                } else if alt_screen {
-                    // On alternate screen (vim, less, Claude Code), send arrow
-                    // keys instead of scroll_display — there's no scrollback.
+                } else if shift && alt_screen {
+                    // Shift+Scroll on alternate screen: send arrow keys to app.
                     let key = if scroll_lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
                     let count = scroll_lines.unsigned_abs();
                     for _ in 0..count {

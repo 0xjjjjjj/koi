@@ -62,9 +62,14 @@ layout(location = 0, index = 0) out vec4 FragColor;
 layout(location = 0, index = 1) out vec4 BlendFactor;
 
 void main() {
-    vec3 coverage = texture(uAtlas, vUV).rgb;
-    FragColor = vec4(vColor.rgb * coverage, 1.0);
-    BlendFactor = vec4(coverage, 1.0);
+    vec3 rgb = texture(uAtlas, vUV).rgb;
+    // Grayscale coverage eliminates subpixel color fringing.
+    // On Retina/HiDPI displays subpixel AA is unnecessary.
+    float gray = dot(rgb, vec3(0.299, 0.587, 0.114));
+    // Gamma-correct for proper font weight on sRGB displays.
+    float corrected = pow(gray, 0.55);
+    FragColor = vec4(vColor.rgb, 1.0);
+    BlendFactor = vec4(vec3(corrected), 1.0);
 }
 "#;
 
