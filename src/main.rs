@@ -360,6 +360,30 @@ impl KoiState {
             return;
         }
 
+        let size = self.window.inner_size();
+        let cw = self.renderer.cell_width();
+        let ch = self.renderer.cell_height();
+        let tab_count = self.tab_manager.count();
+        let tab_bar_h = if tab_count > 1 { ch } else { 0.0 };
+        let cx = self.cursor_pos.0 as f32;
+        let raw_cy = self.cursor_pos.1 as f32;
+
+        // Tab bar click: switch tabs. Don't count toward multi-click selection.
+        if tab_bar_h > 0.0 && raw_cy < tab_bar_h {
+            let tab_width = size.width as f32 / tab_count as f32;
+            let idx = (cx / tab_width) as usize;
+            let current = self.tab_manager.active_index();
+            if idx < tab_count && idx != current {
+                self.tab_animation = Some(TabAnimation {
+                    start: std::time::Instant::now(),
+                    direction: if idx > current { 1.0 } else { -1.0 },
+                });
+                self.tab_manager.goto_tab(idx);
+                self.window.request_redraw();
+            }
+            return;
+        }
+
         // Track multi-click: double-click = word, triple-click = line.
         let now = std::time::Instant::now();
         if now.duration_since(self.last_click_time).as_millis() < 400 {
@@ -369,12 +393,7 @@ impl KoiState {
         }
         self.last_click_time = now;
 
-        let size = self.window.inner_size();
-        let cw = self.renderer.cell_width();
-        let ch = self.renderer.cell_height();
-        let tab_bar_h = if self.tab_manager.count() > 1 { ch } else { 0.0 };
-        let cx = self.cursor_pos.0 as f32;
-        let cy = self.cursor_pos.1 as f32 - tab_bar_h;
+        let cy = raw_cy - tab_bar_h;
         let viewport_h = (size.height as f32 - tab_bar_h).max(0.0);
 
         // Check if cursor is on a divider (4px threshold).
@@ -806,6 +825,17 @@ impl KoiState {
                     self.window.request_redraw();
                     return false;
                 }
+                // Cmd+N: New window (spawn a new koi process)
+                Key::Character(ref s) if s == "n" => {
+                    if let Ok(exe) = std::env::current_exe() {
+                        let _ = std::process::Command::new(exe)
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                    }
+                    return false;
+                }
                 // Cmd+T: New tab
                 Key::Character(ref s) if s == "t" => {
                     let (cols, rows) = self.grid_size();
@@ -1174,19 +1204,19 @@ impl KoiState {
 
     fn handle_scroll(&mut self, delta: winit::event::MouseScrollDelta) {
         self.needs_redraw = true;
-        let scroll_lines = match delta {
-            winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                self.scroll_accumulator = 0.0;
-                y as i32
-            }
-            winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                let ch = self.renderer.cell_height();
-                self.scroll_accumulator += pos.y / ch as f64;
-                let lines = self.scroll_accumulator as i32;
-                self.scroll_accumulator -= lines as f64;
-                lines
-            }
+        // Unified pixel accumulator: works for wired mice (LineDelta, often
+        // fractional on macOS with smooth scrolling) and trackpads (PixelDelta).
+        // Multiplier of 3 matches Alacritty/Terminal.app's feel of ~3 lines
+        // per wheel detent.
+        const SCROLL_MULTIPLIER: f64 = 3.0;
+        let ch = self.renderer.cell_height() as f64;
+        let delta_px = match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64 * ch,
+            winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y,
         };
+        self.scroll_accumulator += delta_px * SCROLL_MULTIPLIER;
+        let scroll_lines = (self.scroll_accumulator / ch).trunc() as i32;
+        self.scroll_accumulator -= scroll_lines as f64 * ch;
         if scroll_lines != 0 {
             if let Some(pane) = self.tab_manager.active_pane() {
                 use alacritty_terminal::term::TermMode;
@@ -1197,11 +1227,14 @@ impl KoiState {
                 let alt_screen = mode.contains(TermMode::ALT_SCREEN);
                 drop(term);
 
-                // Default: scroll terminal scrollback history.
-                // Shift+Scroll: forward to the app (for vim, less, etc.).
+                // Standard terminal behavior (matches Alacritty/iTerm2):
+                //   mouse_mode active → forward scroll to app (tmux, vim, etc.)
+                //   alt_screen (no mouse) → send arrow keys for alternate scroll
+                //   shift overrides either → use koi's own scrollback instead
                 let shift = self.modifiers.shift_key();
 
-                if shift && mouse_mode && sgr {
+                if !shift && mouse_mode && sgr {
+                    // Forward scroll as SGR mouse events to the app.
                     if let Some(hit) = self.mouse_hit() {
                         let button = if scroll_lines > 0 { 64 } else { 65 };
                         let count = scroll_lines.unsigned_abs();
@@ -1212,14 +1245,15 @@ impl KoiState {
                             );
                         }
                     }
-                } else if shift && alt_screen {
-                    // Shift+Scroll on alternate screen: send arrow keys to app.
+                } else if !shift && alt_screen {
+                    // Alt screen without mouse mode: send arrow keys (less, man, etc.)
                     let key = if scroll_lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
                     let count = scroll_lines.unsigned_abs();
                     for _ in 0..count {
                         pane.notifier.send_input(key);
                     }
                 } else {
+                    // Normal screen or shift override: scroll koi's own scrollback.
                     use alacritty_terminal::grid::Scroll;
                     pane.term.lock().scroll_display(Scroll::Delta(scroll_lines));
                 }
