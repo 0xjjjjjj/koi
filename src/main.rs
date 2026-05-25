@@ -1856,7 +1856,12 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 s.render();
             }
             WindowEvent::KeyboardInput { event: key_event, .. } => {
-                if s.handle_keyboard(key_event, &self.event_proxy, &mut self.font_size, self.scale) {
+                // Bind the result before branching: folding this `if` into a match guard
+                // (as clippy's collapsible_match suggests) would move `key_event` inside the
+                // guard, which the compiler rejects (E0507) since it is consumed by value.
+                let should_exit =
+                    s.handle_keyboard(key_event, &self.event_proxy, &mut self.font_size, self.scale);
+                if should_exit {
                     event_loop.exit();
                 }
             }
