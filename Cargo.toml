@@ -18,5 +18,8 @@ parking_lot = "0.12"
 arboard = { version = "3", features = ["image-data"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [build-dependencies]
 gl_generator = "0.14"

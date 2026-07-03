@@ -17,11 +17,25 @@ pub struct Pane {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     pub notifier: Notifier,
     _pty_thread: Option<PtyJoinHandle>,
+    #[cfg(unix)]
+    shell_pid: u32,
 }
 
 impl Drop for Pane {
     fn drop(&mut self) {
-        // Send shutdown, then join the PTY thread to release the Term mutex.
+        // On Unix, SIGHUP the shell's whole process group before we join.
+        // alacritty_terminal's Pty::drop already SIGHUPs the shell PID, but not
+        // the group — so a foreground child like tmux keeps the shell parked in
+        // wait4, which parks Pty::drop's child.wait(), which parks this join()
+        // on the main thread. Signaling -pgid delivers SIGHUP to tmux too so
+        // the shell can actually return from wait4 and exit.
+        #[cfg(unix)]
+        {
+            let pid = self.shell_pid as i32;
+            if pid > 0 {
+                unsafe { libc::kill(-pid, libc::SIGHUP) };
+            }
+        }
         let _ = self.notifier.0.send(Msg::Shutdown);
         if let Some(handle) = self._pty_thread.take() {
             let _ = handle.join();
@@ -87,6 +101,8 @@ impl TabManager {
             ..tty::Options::default()
         };
         let pty = tty::new(&pty_opts, window_size, 0).expect("create PTY");
+        #[cfg(unix)]
+        let shell_pid = pty.child().id();
 
         let pty_event_loop = PtyEventLoop::new(
             term.clone(),
@@ -100,7 +116,16 @@ impl TabManager {
         let notifier = Notifier(pty_event_loop.channel());
         let pty_thread = pty_event_loop.spawn();
 
-        (id, Pane { term, notifier, _pty_thread: Some(pty_thread) })
+        (
+            id,
+            Pane {
+                term,
+                notifier,
+                _pty_thread: Some(pty_thread),
+                #[cfg(unix)]
+                shell_pid,
+            },
+        )
     }
 
     /// Add a new tab with one pane.
