@@ -11,7 +11,11 @@ env:
 
 jobs:
   check:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +29,9 @@ jobs:
         run: cargo build --release
 
       - name: Clippy
+        if: matrix.os == 'macos-latest'
         run: cargo clippy -- -D warnings
 
       - name: Test
+        if: matrix.os == 'macos-latest'
         run: cargo test
