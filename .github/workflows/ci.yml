@@ -35,3 +35,6 @@ jobs:
       - name: Test
         if: matrix.os == 'macos-latest'
         run: cargo test
+
+      - name: PTY spawn smoke test
+        run: cargo test --test pty_smoke
