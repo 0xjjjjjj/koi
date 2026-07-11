@@ -85,6 +85,17 @@ make install   # build + install to /Applications
 make clean     # cargo clean
 ```
 
+## Build for Windows
+
+Windows builds require the `x86_64-pc-windows-msvc` Rust toolchain and the MSVC build tools (Visual Studio Build Tools with the "Desktop development with C++" workload).
+
+```powershell
+pwsh -File bundle\windows\build-windows.ps1          # release build → target\release\koi.exe
+pwsh -File bundle\windows\build-windows.ps1 -Zip     # also produces target\koi-windows-x86_64.zip
+```
+
+The script sets `RUSTFLAGS=-C target-feature=+crt-static` so the MSVC C runtime links statically. The resulting `koi.exe` runs on a stock Windows machine without the Visual C++ redistributable installed.
+
 ## License
 
 MIT
