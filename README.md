@@ -76,7 +76,7 @@ PTY EventLoop (per pane, separate thread)    │
 
 ## Build
 
-Requires Rust toolchain and macOS (uses Core Text for font rasterization).
+Requires the Rust toolchain and macOS (uses Core Text for font rasterization).
 
 ```bash
 make build     # release build
@@ -84,6 +84,42 @@ make app       # build + assemble Koi.app bundle
 make install   # build + install to /Applications
 make clean     # cargo clean
 ```
+
+## Build for Windows
+
+Windows is a secondary target. The release binary is built natively on a Windows host with the MSVC toolchain and the MSVC C runtime linked statically, so the resulting `koi.exe` runs on a stock Windows machine without any Visual C++ redistributable installed.
+
+### Prerequisites
+
+- Windows 10/11 x64
+- [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with the **Desktop development with C++** workload (provides the MSVC linker and Windows SDK)
+- [Rustup](https://rustup.rs/) with the `x86_64-pc-windows-msvc` target (the default host toolchain when you install rustup on Windows):
+
+  ```powershell
+  rustup default stable-x86_64-pc-windows-msvc
+  ```
+
+- PowerShell 7+ (`pwsh`) if you want to use the packaging script directly. PowerShell 5.1 that ships with Windows also works — just invoke it as `powershell.exe`.
+
+### Build the exe
+
+From the repo root:
+
+```powershell
+pwsh -File bundle\windows\build-windows.ps1
+```
+
+Produces `target\release\koi.exe` with a statically linked MSVC runtime (equivalent to compiling with `/MT`).
+
+### Package a portable zip
+
+To also produce a redistributable `target\koi-windows-x86_64.zip` containing `koi.exe` and `README.md`:
+
+```powershell
+pwsh -File bundle\windows\build-windows.ps1 -Zip
+```
+
+Unzip and run `koi.exe` — no installer required.
 
 ## License
 
