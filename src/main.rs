@@ -1924,6 +1924,16 @@ impl ApplicationHandler<KoiEvent> for Koi {
                     extern "C" { fn NSBeep(); }
                     unsafe { NSBeep(); }
                 }
+                #[cfg(target_os = "windows")]
+                {
+                    use windows::Win32::UI::WindowsAndMessaging::{MessageBeep, MB_OK};
+                    unsafe { let _ = MessageBeep(MB_OK); }
+                }
+                #[cfg(all(unix, not(target_os = "macos")))]
+                {
+                    use winit::window::UserAttentionType;
+                    s.window.request_user_attention(Some(UserAttentionType::Critical));
+                }
                 s.bell_flash_until = Some(std::time::Instant::now()
                     + std::time::Duration::from_millis(150));
                 s.needs_redraw = true;
