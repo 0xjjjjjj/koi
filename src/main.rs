@@ -1926,7 +1926,8 @@ impl ApplicationHandler<KoiEvent> for Koi {
                 }
                 #[cfg(target_os = "windows")]
                 {
-                    use windows::Win32::UI::WindowsAndMessaging::{MessageBeep, MB_OK};
+                    use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+                    use windows::Win32::UI::WindowsAndMessaging::MB_OK;
                     unsafe { let _ = MessageBeep(MB_OK); }
                 }
                 #[cfg(all(unix, not(target_os = "macos")))]
