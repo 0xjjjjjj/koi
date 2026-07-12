@@ -177,18 +177,13 @@ impl GlyphCache {
         let rasterized = match self.rasterizer.get_glyph(key) {
             Ok(r) => r,
             Err(e) => {
-                log::warn!("Failed to rasterize '{}': {}", c, e);
-                return Glyph {
-
-                    width: 0.0,
-                    height: 0.0,
-                    left: 0.0,
-                    top: 0.0,
-                    uv_x: 0.0,
-                    uv_y: 0.0,
-                    uv_w: 0.0,
-                    uv_h: 0.0,
+                log::debug!("Failed to rasterize '{}': {}", c, e);
+                let empty = Glyph {
+                    width: 0.0, height: 0.0, left: 0.0, top: 0.0,
+                    uv_x: 0.0, uv_y: 0.0, uv_w: 0.0, uv_h: 0.0,
                 };
+                self.cache.insert(key, empty);
+                return empty;
             }
         };
 
