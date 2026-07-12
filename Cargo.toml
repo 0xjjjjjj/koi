@@ -25,7 +25,12 @@ libc = "0.2"
 windows = { version = "0.58", features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+foreign-types-shared = "0.3"
 
 [build-dependencies]
 gl_generator = "0.14"
