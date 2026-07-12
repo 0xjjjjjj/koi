@@ -610,6 +610,11 @@ impl KoiState {
         #[cfg(not(target_os = "macos"))]
         let super_pressed = ctrl_pressed;
 
+        log::debug!(
+            "key: logical={:?} text={:?} ctrl={} shift={} alt={} super={}",
+            event.logical_key, event.text, ctrl_pressed, shift_pressed, alt_pressed, super_pressed
+        );
+
         // --- About overlay: any key dismisses ---
         if self.show_about {
             self.show_about = false;
