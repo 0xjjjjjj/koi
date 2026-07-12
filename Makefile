@@ -17,7 +17,13 @@ install: app
 	cp -r $(APP) /Applications/Koi.app
 	@echo "Installed to /Applications/Koi.app"
 
+windows:
+	powershell -File bundle/windows/build-windows.ps1
+
+windows-zip:
+	powershell -File bundle/windows/build-windows.ps1 -Zip:$$true
+
 clean:
 	cargo clean
 
-.PHONY: build app install clean
+.PHONY: build app install windows windows-zip clean
