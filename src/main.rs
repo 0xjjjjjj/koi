@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod event;
 mod fonts;
 mod fonts_registrar;
@@ -2043,6 +2045,15 @@ impl ApplicationHandler<KoiEvent> for Koi {
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
     env_logger::init();
     fonts_registrar::register_bundled_fonts();
     let event_loop = EventLoop::<KoiEvent>::with_user_event().build().unwrap();
