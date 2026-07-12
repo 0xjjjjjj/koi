@@ -29,6 +29,7 @@ pub struct GlyphCache {
     bold_key: FontKey,
     italic_key: FontKey,
     bold_italic_key: FontKey,
+    size: Size,
     cache: HashMap<GlyphKey, Glyph>,
     atlas: Atlas,
     needs_regrow: bool,
@@ -107,6 +108,7 @@ impl GlyphCache {
             bold_key,
             italic_key,
             bold_italic_key,
+            size,
             cache: HashMap::new(),
             atlas: Atlas::new(INITIAL_ATLAS_SIZE),
             needs_regrow: false,
@@ -165,7 +167,7 @@ impl GlyphCache {
         let key = GlyphKey {
             font_key,
             character: c,
-            size: crossfont::Size::new(0.), // size is already set on font
+            size: self.size,
         };
 
         if let Some(&glyph) = self.cache.get(&key) {
@@ -191,17 +193,12 @@ impl GlyphCache {
         };
 
         let buffer: Vec<u8> = match &rasterized.buffer {
-            BitmapBuffer::Rgb(data) => {
-                // Keep RGB channels for subpixel LCD antialiasing
-                data.clone()
-            }
-            BitmapBuffer::Rgba(data) => {
-                // Extract RGB channels (drop alpha) for subpixel rendering
-                data.chunks(4)
-                    .flat_map(|rgba| &rgba[..3])
-                    .copied()
-                    .collect()
-            }
+            BitmapBuffer::Rgb(data) => data.clone(),
+            BitmapBuffer::Rgba(data) => data
+                .chunks(4)
+                .flat_map(|rgba| &rgba[..3])
+                .copied()
+                .collect(),
         };
 
         let glyph = match self.atlas.insert(
