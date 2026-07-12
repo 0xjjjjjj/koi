@@ -1,4 +1,6 @@
 mod event;
+mod fonts;
+mod fonts_registrar;
 mod gl;
 mod panes;
 mod renderer;
@@ -2042,6 +2044,7 @@ impl ApplicationHandler<KoiEvent> for Koi {
 
 fn main() {
     env_logger::init();
+    fonts_registrar::register_bundled_fonts();
     let event_loop = EventLoop::<KoiEvent>::with_user_event().build().unwrap();
     let event_proxy = EventProxy::new(event_loop.create_proxy());
     let mut app = Koi::new(event_proxy);
