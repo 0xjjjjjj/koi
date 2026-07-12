@@ -43,9 +43,9 @@ fn clipboard_paste_image() -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_millis();
-    let path = format!("/tmp/koi-paste-{}.png", ts);
+    let path = std::env::temp_dir().join(format!("koi-paste-{}.png", ts));
     rgba.save(&path).ok()?;
-    Some(path)
+    Some(path.to_string_lossy().into_owned())
 }
 
 /// Extract a URL from grid cells around a given column on a given line.
@@ -446,8 +446,12 @@ impl KoiState {
                     use alacritty_terminal::term::TermMode;
                     let mut term = pane.term.lock();
 
-                    // Cmd+click: open URL under cursor.
-                    if self.modifiers.super_key() {
+                    // Cmd+click (macOS) / Ctrl+click (Windows/Linux): open URL.
+                    #[cfg(target_os = "macos")]
+                    let open_url_click = self.modifiers.super_key();
+                    #[cfg(not(target_os = "macos"))]
+                    let open_url_click = self.modifiers.control_key();
+                    if open_url_click {
                         let display_offset = term.grid().display_offset();
                         let point = alacritty_terminal::term::viewport_to_point(
                             display_offset,
@@ -458,7 +462,14 @@ impl KoiState {
                         );
                         if let Some(url) = extract_url_at(&*term, point) {
                             drop(term);
+                            #[cfg(target_os = "macos")]
                             let _ = std::process::Command::new("open").arg(&url).spawn();
+                            #[cfg(target_os = "windows")]
+                            let _ = std::process::Command::new("cmd")
+                                .args(["/c", "start", "", &url])
+                                .spawn();
+                            #[cfg(all(unix, not(target_os = "macos")))]
+                            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
                             self.window.request_redraw();
                             return;
                         }
@@ -587,10 +598,16 @@ impl KoiState {
         // Reset cursor blink so it's visible while typing
         self.cursor_blink = std::time::Instant::now();
 
-        let super_pressed = self.modifiers.super_key();
         let shift_pressed = self.modifiers.shift_key();
         let ctrl_pressed = self.modifiers.control_key();
         let alt_pressed = self.modifiers.alt_key();
+        // "Primary" modifier for koi's own shortcuts: Cmd on macOS,
+        // Ctrl+Shift on Windows/Linux (Windows Terminal convention — leaves
+        // bare Ctrl+C/D/Z free to reach the shell as signals).
+        #[cfg(target_os = "macos")]
+        let super_pressed = self.modifiers.super_key();
+        #[cfg(not(target_os = "macos"))]
+        let super_pressed = ctrl_pressed && shift_pressed;
 
         // --- About overlay: any key dismisses ---
         if self.show_about {
