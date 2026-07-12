@@ -9,6 +9,20 @@ use super::atlas::{Atlas, Glyph};
 const INITIAL_ATLAS_SIZE: i32 = 2048;
 const MAX_ATLAS_SIZE: i32 = 8192;
 
+// Platform-specific fallback font. Each name must be a font that ships with
+// the OS by default so `load_font` cannot panic on a clean install.
+//   - macOS: Menlo ships since 10.6.
+//   - Windows: Consolas ships since Vista (safer than Cascadia Mono, which
+//     is Win Terminal / Win11-era only).
+//   - Other unix: DejaVu Sans Mono is the de-facto default on Debian/Ubuntu
+//     and most desktop distros.
+#[cfg(target_os = "macos")]
+const FALLBACK_FONT: &str = "Menlo";
+#[cfg(target_os = "windows")]
+const FALLBACK_FONT: &str = "Consolas";
+#[cfg(all(unix, not(target_os = "macos")))]
+const FALLBACK_FONT: &str = "DejaVu Sans Mono";
+
 pub struct GlyphCache {
     rasterizer: Rasterizer,
     font_key: FontKey,
@@ -39,9 +53,12 @@ impl GlyphCache {
         let font_key = rasterizer
             .load_font(&font_desc, size)
             .unwrap_or_else(|_| {
-                log::warn!("Font '{}' not found, falling back to Menlo", font_family);
+                log::warn!(
+                    "Font '{}' not found, falling back to {}",
+                    font_family, FALLBACK_FONT
+                );
                 let fallback = FontDesc::new(
-                    "Menlo",
+                    FALLBACK_FONT,
                     Style::Description {
                         slant: Slant::Normal,
                         weight: Weight::Normal,
