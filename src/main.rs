@@ -483,6 +483,13 @@ impl KoiState {
                         pane.notifier.send_bytes(
                             format!("\x1b[<0;{};{}M", col, line).into_bytes(),
                         );
+                    } else if mouse_mode {
+                        // X10/normal mouse protocol: CSI M cb cx cy (each byte offset by 32).
+                        drop(term);
+                        let cb = (0u8).saturating_add(32);
+                        let cx = (col as u8).saturating_add(32);
+                        let cy = (line as u8).saturating_add(32);
+                        pane.notifier.send_bytes(vec![0x1b, b'[', b'M', cb, cx, cy]);
                     } else {
                         let display_offset = term.grid().display_offset();
                         let point = alacritty_terminal::term::viewport_to_point(
@@ -609,11 +616,6 @@ impl KoiState {
         let super_pressed = self.modifiers.super_key();
         #[cfg(not(target_os = "macos"))]
         let super_pressed = ctrl_pressed;
-
-        log::debug!(
-            "key: logical={:?} text={:?} ctrl={} shift={} alt={} super={}",
-            event.logical_key, event.text, ctrl_pressed, shift_pressed, alt_pressed, super_pressed
-        );
 
         // --- About overlay: any key dismisses ---
         if self.show_about {
@@ -1390,8 +1392,10 @@ impl KoiState {
             for layout in &layouts {
                 if let Some(pane) = tab.panes.get(&layout.pane_id) {
                     let is_active = layout.pane_id == active_pane_id;
-                    let show_cursor = is_active && blink_on;
                     let term = pane.term.lock();
+                    use alacritty_terminal::term::TermMode;
+                    let dec_show = term.mode().contains(TermMode::SHOW_CURSOR);
+                    let show_cursor = is_active && blink_on && dec_show;
                     self.renderer.draw_grid(
                         &*term,
                         layout.x + anim_x_offset,
