@@ -16,41 +16,57 @@ pub fn register_bundled_fonts() {
 
 #[cfg(target_os = "windows")]
 mod imp {
+    use std::io::Write;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::PathBuf;
     use std::sync::Once;
-    use windows::Win32::Graphics::Gdi::AddFontMemResourceEx;
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{AddFontResourceExW, FR_PRIVATE};
 
     static ONCE: Once = Once::new();
 
+    // AddFontMemResourceEx is NOT enumerable by DirectWrite (per MSDN), so
+    // crossfont's DirectWrite lookup can't resolve the font by name.
+    // AddFontResourceExW + FR_PRIVATE is enumerable and process-scoped.
     pub fn register(faces: &[&[u8]]) {
         ONCE.call_once(|| {
+            let Some(dir) = extract_dir() else {
+                log::warn!("Bundled font extraction dir unavailable; skipping registration");
+                return;
+            };
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                log::warn!("Failed to create bundled-font dir {:?}: {}", dir, e);
+                return;
+            }
             for (i, bytes) in faces.iter().enumerate() {
-                let mut installed: u32 = 0;
-                // SAFETY: `bytes` is a `'static` slice from `include_bytes!`;
-                // the pointer/length remain valid for the process lifetime.
-                // AddFontMemResourceEx copies the data into a private table,
-                // so the returned handle can be dropped without unregistering
-                // (per MSDN: process-scoped registration).
-                let handle = unsafe {
-                    AddFontMemResourceEx(
-                        bytes.as_ptr() as *const _,
-                        bytes.len() as u32,
-                        None,
-                        &mut installed as *mut u32,
-                    )
+                let path = dir.join(format!("koi-plexmono-{}.otf", i));
+                if !path.exists() {
+                    match std::fs::File::create(&path).and_then(|mut f| f.write_all(bytes)) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            log::warn!("Failed to write bundled font to {:?}: {}", path, e);
+                            continue;
+                        }
+                    }
+                }
+                let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+                let added = unsafe {
+                    AddFontResourceExW(PCWSTR(wide.as_ptr()), FR_PRIVATE, None)
                 };
-                if handle.is_invalid() || installed == 0 {
-                    log::warn!(
-                        "AddFontMemResourceEx failed for bundled font #{} ({} bytes)",
-                        i, bytes.len()
-                    );
+                if added == 0 {
+                    log::warn!("AddFontResourceExW failed for {:?}", path);
                 } else {
-                    log::info!(
-                        "Registered bundled font #{} ({} face(s), {} bytes)",
-                        i, installed, bytes.len()
-                    );
+                    log::info!("Registered bundled font #{} via GDI/DirectWrite ({:?})", i, path);
                 }
             }
         });
+    }
+
+    fn extract_dir() -> Option<PathBuf> {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("TEMP").map(PathBuf::from))
+            .map(|base| base.join("koi").join("fonts"))
     }
 }
 
