@@ -43,7 +43,12 @@ fn clipboard_paste_image() -> Option<String> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_millis();
-    let path = std::env::temp_dir().join(format!("koi-paste-{}.png", ts));
+    // Preserve /tmp on macOS (established convention); use portable temp_dir elsewhere.
+    #[cfg(target_os = "macos")]
+    let dir = std::path::PathBuf::from("/tmp");
+    #[cfg(not(target_os = "macos"))]
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("koi-paste-{}.png", ts));
     rgba.save(&path).ok()?;
     Some(path.to_string_lossy().into_owned())
 }
@@ -1284,6 +1289,19 @@ impl KoiState {
                                 format!("\x1b[<{};{};{}M", button, hit.col, hit.line)
                                     .into_bytes(),
                             );
+                        }
+                    }
+                } else if !shift && mouse_mode {
+                    // X10/normal mouse mode: no SGR extension.
+                    // CSI M cb cx cy with each byte offset by 32.
+                    if let Some(hit) = self.mouse_hit() {
+                        let button: u8 = if scroll_lines > 0 { 64 } else { 65 };
+                        let cb = button.saturating_add(32);
+                        let cx = (hit.col as u8).saturating_add(32);
+                        let cy = (hit.line as u8).saturating_add(32);
+                        let count = scroll_lines.unsigned_abs();
+                        for _ in 0..count {
+                            pane.notifier.send_bytes(vec![0x1b, b'[', b'M', cb, cx, cy]);
                         }
                     }
                 } else if !shift && alt_screen {
