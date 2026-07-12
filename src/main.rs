@@ -1084,8 +1084,10 @@ impl KoiState {
                     return false;
                 }
                 _ => {
-                    // Don't forward other Cmd+key combos to PTY
+                    #[cfg(target_os = "macos")]
                     return false;
+                    #[cfg(not(target_os = "macos"))]
+                    {}
                 }
             }
         }
@@ -1218,8 +1220,11 @@ impl KoiState {
                         None
                     }
                 } else if alt_pressed {
-                    // Option-as-Alt: send ESC prefix + text
-                    event.text.as_ref().map(|t| {
+                    let s = event.text.as_deref().or_else(|| match event.logical_key {
+                        Key::Character(ref s) => Some(s.as_str()),
+                        _ => None,
+                    });
+                    s.map(|t| {
                         let mut bytes = vec![0x1b];
                         bytes.extend_from_slice(t.as_bytes());
                         Cow::Owned(bytes)
