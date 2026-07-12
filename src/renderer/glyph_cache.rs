@@ -191,18 +191,20 @@ impl GlyphCache {
         };
 
         let buffer: Vec<u8> = match &rasterized.buffer {
-            BitmapBuffer::Rgb(data) => {
-                // Keep RGB channels for subpixel LCD antialiasing
-                data.clone()
-            }
-            BitmapBuffer::Rgba(data) => {
-                // Extract RGB channels (drop alpha) for subpixel rendering
-                data.chunks(4)
-                    .flat_map(|rgba| &rgba[..3])
-                    .copied()
-                    .collect()
-            }
+            BitmapBuffer::Rgb(data) => data.clone(),
+            BitmapBuffer::Rgba(data) => data
+                .chunks(4)
+                .flat_map(|rgba| &rgba[..3])
+                .copied()
+                .collect(),
         };
+
+        let nonzero = buffer.iter().filter(|&&b| b != 0).count();
+        let max_v = buffer.iter().copied().max().unwrap_or(0);
+        log::info!(
+            "glyph '{}' {}x{} buf_len={} nonzero={} max={}",
+            key.character, rasterized.width, rasterized.height, buffer.len(), nonzero, max_v
+        );
 
         let glyph = match self.atlas.insert(
             rasterized.width as i32,
