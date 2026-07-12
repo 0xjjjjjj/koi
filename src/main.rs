@@ -602,12 +602,13 @@ impl KoiState {
         let ctrl_pressed = self.modifiers.control_key();
         let alt_pressed = self.modifiers.alt_key();
         // "Primary" modifier for koi's own shortcuts: Cmd on macOS,
-        // Ctrl+Shift on Windows/Linux (Windows Terminal convention — leaves
-        // bare Ctrl+C/D/Z free to reach the shell as signals).
+        // bare Ctrl on Windows/Linux. Ctrl+C / Ctrl+D shell-signal conflicts
+        // are handled per-shortcut below (Ctrl+C is only copy if there's a
+        // text selection, else passes through as SIGINT).
         #[cfg(target_os = "macos")]
         let super_pressed = self.modifiers.super_key();
         #[cfg(not(target_os = "macos"))]
-        let super_pressed = ctrl_pressed && shift_pressed;
+        let super_pressed = ctrl_pressed;
 
         // --- About overlay: any key dismisses ---
         if self.show_about {
@@ -970,17 +971,29 @@ impl KoiState {
                     self.window.request_redraw();
                     return false;
                 }
-                // Cmd+C: Copy selection to clipboard
-                Key::Character(ref s) if s == "c" => {
+                // Cmd+C (macOS) / Ctrl+C (win/linux): Copy selection to clipboard.
+                // On win/linux, only intercept when there IS a selection, so
+                // bare Ctrl+C without a selection still reaches the shell as SIGINT.
+                Key::Character(ref s) if s.eq_ignore_ascii_case("c") => {
                     if let Some(pane) = self.tab_manager.active_pane() {
                         let mut term = pane.term.lock();
                         if let Some(text) = term.selection_to_string() {
                             clipboard_copy(&text);
+                            term.selection = None;
+                            self.window.request_redraw();
+                            return false;
                         }
-                        term.selection = None;
+                        #[cfg(target_os = "macos")]
+                        {
+                            term.selection = None;
+                            self.window.request_redraw();
+                            return false;
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            // No selection on win/linux — fall through to shell.
+                        }
                     }
-                    self.window.request_redraw();
-                    return false;
                 }
                 // Cmd+F: Search scrollback
                 Key::Character(ref s) if s == "f" => {
