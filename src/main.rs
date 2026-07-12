@@ -483,6 +483,10 @@ impl KoiState {
                     let mode = term.mode();
                     let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
                     let sgr = mode.contains(TermMode::SGR_MOUSE);
+                    log::debug!(
+                        "click col={} line={} mode={:?} mouse_mode={} sgr={}",
+                        col, line, mode, mouse_mode, sgr
+                    );
                     if mouse_mode && sgr {
                         drop(term);
                         pane.notifier.send_bytes(
